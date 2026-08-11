@@ -1,0 +1,16 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*-build.*"
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ohida/codex-echo/.github/workflows/release-build.yml@6c0237800f55e52db15405da9f58b38489ea45a4
