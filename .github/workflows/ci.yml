@@ -23,8 +23,46 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run tests
-        run: NSUnbufferedIO=YES /usr/bin/swift test
+      - name: Capture worktree identity test stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          NSUnbufferedIO=YES /usr/bin/swift test \
+            --filter ProjectWorktreeIdentityTests.testMainAndWorktreeTasksShareCanonicalColorAndVoice &
+          swift_pid=$!
+
+          (
+            test_pid=""
+            for _ in {1..120}; do
+              test_pid="$(
+                pgrep -f 'CodexEchoPackageTests.xctest/Contents/MacOS/CodexEchoPackageTests' \
+                  | head -n 1 \
+                  || true
+              )"
+              [[ -n "$test_pid" ]] && break
+              sleep 1
+            done
+
+            if [[ -z "$test_pid" ]]; then
+              echo "XCTest process did not start before the diagnostic timeout"
+              kill -TERM "$swift_pid" 2>/dev/null || true
+              exit 1
+            fi
+
+            sleep 5
+            echo "Sampling stalled XCTest process $test_pid"
+            /usr/bin/sample "$test_pid" 1 1 || true
+            kill -TERM "$test_pid" "$swift_pid" 2>/dev/null || true
+          ) &
+          watchdog_pid=$!
+
+          set +e
+          wait "$swift_pid"
+          status=$?
+          set -e
+          kill -TERM "$watchdog_pid" 2>/dev/null || true
+          wait "$watchdog_pid" 2>/dev/null || true
+          exit "$status"
 
       - name: Build local app bundle
         run: ./scripts/build_app.sh
