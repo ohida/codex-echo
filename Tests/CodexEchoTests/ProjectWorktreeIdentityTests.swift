@@ -92,6 +92,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
       settings: MenuBarSettings(userDefaults: defaults),
       userDefaults: defaults
     )
+    defer { model.stop() }
 
     for (threadID, cwd) in [
       ("main-thread", repositoryDirectory.path),
@@ -144,6 +145,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
       settings: MenuBarSettings(userDefaults: defaults),
       userDefaults: defaults
     )
+    defer { model.stop() }
 
     for (threadID, cwd) in [
       ("main-thread", canonicalProjectID),
