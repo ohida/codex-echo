@@ -5,8 +5,8 @@ import XCTest
 @testable import CodexEcho
 @testable import CodexIPC
 
-@MainActor
 final class ProjectWorktreeIdentityTests: XCTestCase {
+  @MainActor
   func testRepositoryFallbackKeepsDistinctClonesAndExplicitNoProjectSeparate() throws {
     let firstRepository = FileManager.default.temporaryDirectory
       .appendingPathComponent("codex-echo-clone-a-\(UUID().uuidString)", isDirectory: true)
@@ -41,6 +41,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
     )
   }
 
+  @MainActor
   func testWorktreeInheritsProjectColorBeforeDesktopAssignmentArrives() throws {
     let repositoryDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("codex-echo-repository-\(UUID().uuidString)", isDirectory: true)
@@ -111,6 +112,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
     XCTAssertTrue(model.tasks.allSatisfy { $0.effectiveVoice == .reed })
   }
 
+  @MainActor
   func testMainAndWorktreeTasksShareCanonicalColorAndVoice() throws {
     let suiteName = "ProjectWorktreeIdentityTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
