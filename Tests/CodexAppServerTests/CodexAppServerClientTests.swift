@@ -476,7 +476,7 @@ final class CodexAppServerClientTests: XCTestCase {
       reconnectDelay: 1,
       terminationGracePeriod: 0.1
     )
-    weak let weakClient = client
+    let weakClient = { [weak client] in client }
     client?.start()
 
     let launchDeadline = Date().addingTimeInterval(2)
@@ -504,7 +504,7 @@ final class CodexAppServerClientTests: XCTestCase {
       Thread.sleep(forTimeInterval: 0.01)
     }
 
-    XCTAssertNil(weakClient)
+    XCTAssertNil(weakClient())
     errno = 0
     XCTAssertEqual(Darwin.kill(processIdentifier, 0), -1)
     XCTAssertEqual(errno, ESRCH)

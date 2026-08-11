@@ -192,9 +192,9 @@ final class StatusItemGestureControllerTests: XCTestCase {
       )
     )
 
-    weak let weakController = controller
+    let weakController = { [weak controller] in controller }
     controller = nil
-    XCTAssertNil(weakController)
+    XCTAssertNil(weakController())
     XCTAssertNil(click.delegate)
     XCTAssertNil(pan.delegate)
   }
