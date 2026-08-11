@@ -114,7 +114,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
   }
 
   @MainActor
-  func testMainAndWorktreeTasksShareCanonicalColorAndVoice() throws {
+  func testMainAndWorktreeTasksShareCanonicalColorAndVoice() async throws {
     let suiteName = "ProjectWorktreeIdentityTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
     defer { defaults.removePersistentDomain(forName: suiteName) }
