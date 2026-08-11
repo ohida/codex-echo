@@ -26,21 +26,22 @@ final class TaskProjectIdentityResolver {
   }
 
   private func repositoryProjectID(containing cwd: String) -> String? {
-    var directory = URL(fileURLWithPath: cwd, isDirectory: true).standardizedFileURL
+    var directoryPath = URL(fileURLWithPath: cwd, isDirectory: true).standardizedFileURL.path
 
     while true {
-      let dotGit = directory.appendingPathComponent(".git")
+      let dotGit = URL(fileURLWithPath: directoryPath, isDirectory: true)
+        .appendingPathComponent(".git")
       var isDirectory: ObjCBool = false
       if FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory) {
         if isDirectory.boolValue {
-          return directory.path
+          return directoryPath
         }
-        return linkedWorktreeProjectID(dotGit: dotGit) ?? directory.path
+        return linkedWorktreeProjectID(dotGit: dotGit) ?? directoryPath
       }
 
-      let parent = directory.deletingLastPathComponent()
-      guard parent.path != directory.path else { return nil }
-      directory = parent
+      let parentPath = (directoryPath as NSString).deletingLastPathComponent
+      guard !parentPath.isEmpty, parentPath != directoryPath else { return nil }
+      directoryPath = parentPath
     }
   }
 

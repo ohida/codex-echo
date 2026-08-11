@@ -39,6 +39,10 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
       ),
       .noProject
     )
+    XCTAssertEqual(
+      resolver.resolve(projectContext: nil, fallbackCWD: "/"),
+      .project("/")
+    )
   }
 
   @MainActor
