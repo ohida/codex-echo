@@ -23,8 +23,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run tests
-        run: NSUnbufferedIO=YES /usr/bin/swift test
+      - name: Run worktree identity tests
+        run: NSUnbufferedIO=YES /usr/bin/swift test --filter ProjectWorktreeIdentityTests
+
+      - name: Run remaining tests
+        run: NSUnbufferedIO=YES /usr/bin/swift test --skip ProjectWorktreeIdentityTests
 
       - name: Build local app bundle
         run: ./scripts/build_app.sh
