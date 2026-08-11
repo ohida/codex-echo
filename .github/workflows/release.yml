@@ -10,7 +10,8 @@ permissions: {}
 jobs:
   release:
     permissions:
+      actions: read
       contents: read
       id-token: write
       attestations: write
-    uses: ohida/codex-echo/.github/workflows/release-build.yml@6c0237800f55e52db15405da9f58b38489ea45a4
+    uses: ohida/codex-echo/.github/workflows/release-build.yml@34ca34ad87b9241fe2c71c52e81445b7093ae71b
