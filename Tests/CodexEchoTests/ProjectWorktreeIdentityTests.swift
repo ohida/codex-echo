@@ -90,9 +90,9 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
       ),
       desktopAppController: WorktreeIdentityTestDesktopAppController(),
       settings: MenuBarSettings(userDefaults: defaults),
-      userDefaults: defaults
+      userDefaults: defaults,
+      startsTransportClients: false
     )
-    defer { model.stop() }
 
     for (threadID, cwd) in [
       ("main-thread", repositoryDirectory.path),
@@ -143,9 +143,9 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
       appServerClient: appServerClient,
       desktopAppController: WorktreeIdentityTestDesktopAppController(),
       settings: MenuBarSettings(userDefaults: defaults),
-      userDefaults: defaults
+      userDefaults: defaults,
+      startsTransportClients: false
     )
-    defer { model.stop() }
 
     for (threadID, cwd) in [
       ("main-thread", canonicalProjectID),

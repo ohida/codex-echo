@@ -608,7 +608,8 @@ final class CodexActivityModel: ObservableObject {
     settings: MenuBarSettings = MenuBarSettings(),
     userDefaults: UserDefaults = .standard,
     customizationStore: TaskCustomizationStore? = nil,
-    debugTaskFixtureName: String? = nil
+    debugTaskFixtureName: String? = nil,
+    startsTransportClients: Bool = true
   ) {
     self.ipcClient = ipcClient
     self.appServerClient = appServerClient
@@ -741,8 +742,10 @@ final class CodexActivityModel: ObservableObject {
       }
     #endif
     desktopAppController.start()
-    ipcClient.start()
-    appServerClient.start()
+    if startsTransportClients {
+      ipcClient.start()
+      appServerClient.start()
+    }
   }
 
   func stop() {
