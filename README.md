@@ -53,16 +53,21 @@ Release tags are lightweight tags named `v<version>-build.<build>`. The
 tag-triggered workflow calls the trusted release workflow at a reviewed full
 commit SHA. That pinned workflow:
 
-1. builds the tagged source without release secrets;
-2. signs, notarizes, and staples the app before packaging it as the final ZIP,
+1. requires workflow attempt 1, an unchanged direct tag, a tagged source commit
+   on `main`, and a completed successful aggregate CI run for that exact commit;
+2. builds the tagged source without release secrets;
+3. signs, notarizes, and staples the app before packaging it as the final ZIP,
    and separately signs, notarizes, and staples the DMG in the protected Apple
    environment;
-3. signs the Sparkle appcast in a separate protected environment;
-4. creates GitHub artifact attestations for those exact three files; and
-5. retains those files as one immutable workflow artifact.
+4. signs the Sparkle appcast in a separate protected environment;
+5. creates GitHub artifact attestations for those exact three files; and
+6. retains those files as one immutable workflow artifact.
 
 Repository rules reject updates or deletion of release tags. The workflow also
 re-resolves the tag before signing and attestation, and refuses a moved tag.
+The signing environments require an explicit owner approval before credentials
+are exposed. A failed release workflow is not rerun; the next attempt uses a
+higher build number and a new immutable tag.
 
 The pinned workflow completes its native-signature, notarization, and appcast
 integrity checks before attesting the exact files. The release promoter accepts

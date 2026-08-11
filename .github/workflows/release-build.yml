@@ -6,14 +6,39 @@ on:
 permissions: {}
 
 jobs:
-  source:
+  test:
     if: >-
       github.repository == 'ohida/codex-echo' &&
       github.event_name == 'push' &&
+      github.run_attempt == 1 &&
       startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
+      contents: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Test tagged source
+        run: /usr/bin/swift test --package-path source
+
+  source:
+    needs: test
+    if: >-
+      needs.test.result == 'success' &&
+      github.repository == 'ohida/codex-echo' &&
+      github.event_name == 'push' &&
+      github.run_attempt == 1 &&
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      actions: read
       contents: read
     steps:
       - name: Check out tagged source
@@ -31,8 +56,37 @@ jobs:
           path: builder
           persist-credentials: false
 
-      - name: Test tagged source
-        run: /usr/bin/swift test --package-path source
+      - name: Authorize tagged source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]
+
+          resolved_tag="$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
+            --jq '.object.type + " " + .object.sha')"
+          [[ "$resolved_tag" == "commit $GITHUB_SHA" ]]
+
+          comparison="$RUNNER_TEMP/main-comparison.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" \
+            >"$comparison"
+          [[ "$(jq -r '.merge_base_commit.sha' "$comparison")" == "$GITHUB_SHA" ]]
+
+          runs="$RUNNER_TEMP/ci-runs.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=100" \
+            >"$runs"
+          jq -e --arg sha "$GITHUB_SHA" '
+            any(.workflow_runs[];
+              .head_sha == $sha and
+              .event == "push" and
+              .head_branch == "main" and
+              .status == "completed" and
+              .conclusion == "success")
+          ' "$runs" >/dev/null
 
       - name: Build secretless source payload
         env:
@@ -54,6 +108,7 @@ jobs:
 
   apple:
     needs: source
+    if: needs.source.result == 'success' && github.run_attempt == 1
     runs-on: macos-15
     timeout-minutes: 90
     environment: release-apple-signing
@@ -163,6 +218,7 @@ jobs:
 
   sparkle:
     needs: apple
+    if: needs.apple.result == 'success' && github.run_attempt == 1
     runs-on: macos-15
     timeout-minutes: 30
     environment: release-sparkle-signing
@@ -207,6 +263,7 @@ jobs:
 
   attest:
     needs: sparkle
+    if: needs.sparkle.result == 'success' && github.run_attempt == 1
     runs-on: macos-15
     timeout-minutes: 20
     permissions:
