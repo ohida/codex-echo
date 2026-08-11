@@ -24,7 +24,7 @@ jobs:
           persist-credentials: false
 
       - name: Run tests
-        run: /usr/bin/swift test
+        run: NSUnbufferedIO=YES /usr/bin/swift test
 
       - name: Build local app bundle
         run: ./scripts/build_app.sh
