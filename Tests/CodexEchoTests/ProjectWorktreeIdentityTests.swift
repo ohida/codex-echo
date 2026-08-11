@@ -115,9 +115,13 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
 
   @MainActor
   func testMainAndWorktreeTasksShareCanonicalColorAndVoice() async throws {
+    print("ProjectWorktreeIdentityTests: entered test body")
     let suiteName = "ProjectWorktreeIdentityTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defer {
+      print("ProjectWorktreeIdentityTests: cleaning defaults")
+      defaults.removePersistentDomain(forName: suiteName)
+    }
     let canonicalProjectID = "/Users/example/Codes/medianoche"
     let worktreeProjectID = "/Users/example/.codex/worktrees/ff9f/medianoche"
     let dormantWorktreeProjectID = "/Users/example/.codex/worktrees/aaaa/medianoche"
@@ -133,6 +137,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
     voices.setProjectVoice(.flo, for: worktreeProjectID)
     voices.setProjectVoice(.sandy, for: dormantWorktreeProjectID)
     voices.save(to: defaults)
+    print("ProjectWorktreeIdentityTests: saved preferences")
 
     let ipcClient = CodexIPCClient()
     let appServerClient = CodexAppServerClient(
@@ -146,6 +151,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
       userDefaults: defaults,
       startsTransportClients: false
     )
+    print("ProjectWorktreeIdentityTests: initialized model")
 
     for (threadID, cwd) in [
       ("main-thread", canonicalProjectID),
@@ -159,6 +165,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
         )
       )
     }
+    print("ProjectWorktreeIdentityTests: delivered IPC snapshots")
 
     let mainThread = try XCTUnwrap(
       CodexThreadDescriptor(
@@ -180,6 +187,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
         projectContext: .project(path: canonicalProjectID)
       )
     )
+    print("ProjectWorktreeIdentityTests: built catalog descriptors")
     appServerClient.eventHandler?(
       .threadsChanged(
         [mainThread, worktreeThread],
@@ -195,6 +203,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
         ]
       )
     )
+    print("ProjectWorktreeIdentityTests: delivered catalog aliases")
 
     XCTAssertEqual(model.tasks.count, 2)
     XCTAssertTrue(model.tasks.allSatisfy { $0.projectID == canonicalProjectID })
@@ -211,6 +220,7 @@ final class ProjectWorktreeIdentityTests: XCTestCase {
     XCTAssertNil(restoredVoices.projectVoice(for: worktreeProjectID))
     XCTAssertNil(restoredColors.projectColor(for: dormantWorktreeProjectID))
     XCTAssertNil(restoredVoices.projectVoice(for: dormantWorktreeProjectID))
+    print("ProjectWorktreeIdentityTests: completed assertions")
   }
 
   private func workingConversationState(threadID: String, cwd: String) -> JSONValue {
