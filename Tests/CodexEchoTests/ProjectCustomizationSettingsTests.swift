@@ -4,8 +4,8 @@ import XCTest
 
 @testable import CodexEcho
 
-@MainActor
 final class ProjectCustomizationSettingsTests: XCTestCase {
+  @MainActor
   func testNoProjectSharedSettingsAlwaysHaveAnEditableManagerRow() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -30,6 +30,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     )
   }
 
+  @MainActor
   func testManagerUsesAnIndependentMovableResizableWindow() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -70,6 +71,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     window.close()
   }
 
+  @MainActor
   func testStoreCombinesProjectColorsAndVoicesByNormalizedProjectPath() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -110,6 +112,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     )
   }
 
+  @MainActor
   func testMigrationMovesLegacyWorktreeCustomizationToCanonicalProject() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -146,6 +149,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     XCTAssertNil(reloadedStore.projectVoice(for: worktreeProjectID))
   }
 
+  @MainActor
   func testCanonicalCustomizationWinsAndLegacyValueDoesNotReturnAfterClear() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -195,6 +199,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     XCTAssertEqual(reloadedStore.projectCustomizations.map(\.identity), [.noProject])
   }
 
+  @MainActor
   func testLateAliasesChooseTheSameDeterministicPreferenceInEitherOrder() throws {
     let canonicalProjectID = "/Users/example/Codes/medianoche"
     let firstWorktreeProjectID = "/Users/example/.codex/worktrees/aaaa/medianoche"
@@ -234,6 +239,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     }
   }
 
+  @MainActor
   func testCanonicalProjectPathIsNeverConsumedAsAnotherProjectsAlias() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -265,6 +271,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     XCTAssertNil(store.projectVoice(for: unrelatedCanonical))
   }
 
+  @MainActor
   func testRemovingProjectCustomizationPreservesTaskAndOtherProjectPreferences() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -299,6 +306,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     )
   }
 
+  @MainActor
   func testNoProjectCustomizationIsSharedAndMovementOnlySwitchesTheParentScope() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -326,6 +334,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     XCTAssertEqual(store.parentVoice(for: .noProject), .flo)
   }
 
+  @MainActor
   func testNoProjectCustomizationHasAPathlessManagerRowAndCanBeRemovedAlone() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -357,6 +366,7 @@ final class ProjectCustomizationSettingsTests: XCTestCase {
     XCTAssertNil(store.projectCustomizations.first?.voice)
   }
 
+  @MainActor
   func testManagerRemovalImmediatelyRefreshesActiveProjectPresentation() throws {
     let suiteName = "CodexEchoTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
