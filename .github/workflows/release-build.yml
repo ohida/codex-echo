@@ -1,0 +1,276 @@
+name: Trusted release build
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  source:
+    if: >-
+      github.repository == 'ohida/codex-echo' &&
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Check out trusted builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: builder
+          persist-credentials: false
+
+      - name: Test tagged source
+        run: /usr/bin/swift test --package-path source
+
+      - name: Build secretless source payload
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILDER_COMMIT: ${{ job.workflow_sha }}
+        run: >-
+          /bin/zsh builder/scripts/build_release.sh
+          prepare-source source "$RUNNER_TEMP/source-payload"
+
+      - name: Upload source payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-payload-${{ github.sha }}
+          path: ${{ runner.temp }}/source-payload
+          if-no-files-found: error
+          retention-days: 30
+
+  apple:
+    needs: source
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release-apple-signing
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: builder
+          persist-credentials: false
+
+      - name: Download source payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: source-payload-${{ github.sha }}
+          path: ${{ runner.temp }}/source-payload
+
+      - name: Confirm release tag is unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved="$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
+            --jq '.object.type + " " + .object.sha')"
+          [[ "$resolved" == "commit $GITHUB_SHA" ]]
+
+      - name: Import Developer ID certificate
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ -n "$CODE_SIGN_IDENTITY" && -n "$P12_BASE64" && -n "$P12_PASSWORD" ]]
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain="$RUNNER_TEMP/codex-echo-signing.keychain-db"
+          keychain_password="$(/usr/bin/uuidgen)"
+          printf '%s' "$P12_BASE64" | /usr/bin/base64 -D > "$certificate"
+          /usr/bin/security create-keychain -p "$keychain_password" "$keychain"
+          /usr/bin/security set-keychain-settings -lut 7200 "$keychain"
+          /usr/bin/security unlock-keychain -p "$keychain_password" "$keychain"
+          /usr/bin/security import "$certificate" \
+            -k "$keychain" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          /usr/bin/security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain"
+          /usr/bin/security list-keychains -d user -s "$keychain"
+          /usr/bin/security find-identity -v -p codesigning "$keychain" \
+            | /usr/bin/grep -F -- "$CODE_SIGN_IDENTITY"
+          /bin/rm -f -- "$certificate"
+
+      - name: Sign and notarize Apple artifacts
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILDER_COMMIT: ${{ job.workflow_sha }}
+          CODE_SIGN_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ -n "$APPLE_NOTARY_KEY_BASE64" ]]
+          notary_key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_NOTARY_KEY_BASE64" \
+            | /usr/bin/base64 -D > "$notary_key"
+          /bin/chmod 600 "$notary_key"
+          APPLE_NOTARY_KEY_PATH="$notary_key" \
+            /bin/zsh builder/scripts/build_release.sh \
+              apple-finalize \
+              "$RUNNER_TEMP/source-payload" \
+              "$RUNNER_TEMP/apple-artifacts"
+
+      - name: Remove Apple credentials
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          /usr/bin/security delete-keychain \
+            "$RUNNER_TEMP/codex-echo-signing.keychain-db" 2>/dev/null || true
+          /bin/rm -f -- \
+            "$RUNNER_TEMP/developer-id.p12" \
+            "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Upload Apple artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apple-artifacts-${{ github.sha }}
+          path: ${{ runner.temp }}/apple-artifacts
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  sparkle:
+    needs: apple
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: release-sparkle-signing
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: builder
+          persist-credentials: false
+
+      - name: Download Apple artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: apple-artifacts-${{ github.sha }}
+          path: ${{ runner.temp }}/apple-artifacts
+
+      - name: Sign Sparkle update and generate appcast
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILDER_COMMIT: ${{ job.workflow_sha }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: >-
+          /bin/zsh builder/scripts/build_release.sh
+          sparkle-finalize
+          "$RUNNER_TEMP/apple-artifacts"
+          "$RUNNER_TEMP/final-artifacts"
+
+      - name: Upload final artifacts for attestation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Codex-Echo-${{ github.sha }}
+          path: ${{ runner.temp }}/final-artifacts
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  attest:
+    needs: sparkle
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download final artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Codex-Echo-${{ github.sha }}
+          path: ${{ runner.temp }}/final-artifacts
+
+      - name: Confirm release tag is unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved="$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
+            --jq '.object.type + " " + .object.sha')"
+          [[ "$resolved" == "commit $GITHUB_SHA" ]]
+
+      - name: Check final artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/final-artifacts"
+          tag="${GITHUB_REF_NAME#v}"
+          version="${tag%-build.*}"
+          build="${tag##*.}"
+          zip="$directory/Codex-Echo-$version-build.$build.zip"
+          dmg="$directory/Codex-Echo-$version-build.$build.dmg"
+          appcast="$directory/appcast.xml"
+          entry_count="$(/usr/bin/find "$directory" \
+            -mindepth 1 -maxdepth 1 -print \
+            | /usr/bin/wc -l \
+            | /usr/bin/tr -d '[:space:]')"
+          [[ "$entry_count" == 3 ]]
+          [[ -z "$(/usr/bin/find "$directory" \
+            -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]
+          [[ -f "$zip" && -f "$dmg" && -f "$appcast" ]]
+          extracted="$RUNNER_TEMP/extracted"
+          /usr/bin/ditto -x -k "$zip" "$extracted"
+          [[ "$(/usr/bin/find "$extracted" \
+            -mindepth 1 -maxdepth 1 -print \
+            | /usr/bin/wc -l \
+            | /usr/bin/tr -d '[:space:]')" == 1 ]]
+          [[ -d "$extracted/Codex Echo.app" ]]
+          /usr/bin/codesign --verify --deep --strict --verbose=2 \
+            "$extracted/Codex Echo.app"
+          /usr/bin/xcrun stapler validate "$extracted/Codex Echo.app"
+          /usr/sbin/spctl --assess --type execute --verbose=4 \
+            "$extracted/Codex Echo.app"
+          /usr/bin/hdiutil verify "$dmg"
+          /usr/bin/codesign --verify --verbose=4 "$dmg"
+          /usr/bin/xcrun stapler validate "$dmg"
+          /usr/bin/xmllint --noout "$appcast"
+
+      - name: Attest exact release bytes
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/final-artifacts/*.zip
+            ${{ runner.temp }}/final-artifacts/*.dmg
+            ${{ runner.temp }}/final-artifacts/appcast.xml
