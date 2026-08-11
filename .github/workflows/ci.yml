@@ -34,11 +34,7 @@ jobs:
           (
             test_pid=""
             for _ in {1..120}; do
-              test_pid="$(
-                pgrep -f 'CodexEchoPackageTests.xctest/Contents/MacOS/CodexEchoPackageTests' \
-                  | head -n 1 \
-                  || true
-              )"
+              test_pid="$(pgrep -x xctest | tail -n 1 || true)"
               [[ -n "$test_pid" ]] && break
               sleep 1
             done
@@ -50,6 +46,7 @@ jobs:
             fi
 
             sleep 5
+            ps -p "$test_pid" -o pid=,ppid=,comm=,args= || true
             echo "Sampling stalled XCTest process $test_pid"
             /usr/bin/sample "$test_pid" 1 1 || true
             kill -TERM "$test_pid" "$swift_pid" 2>/dev/null || true
