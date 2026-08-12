@@ -1,4 +1,5 @@
-name: Release
+name: Build release artifacts
+run-name: Release artifact build · ${{ github.ref_name }}
 
 on:
   push:

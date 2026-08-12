@@ -1,4 +1,5 @@
 name: Release path verification
+run-name: DMG path verification · ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
