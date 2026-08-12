@@ -14,4 +14,4 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    uses: ohida/codex-echo/.github/workflows/release-build.yml@34ca34ad87b9241fe2c71c52e81445b7093ae71b
+    uses: ohida/codex-echo/.github/workflows/release-build.yml@d491552850a2c1b853194ca142c4fb193037197c
