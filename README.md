@@ -83,7 +83,8 @@ read the source commit from the release tag and the builder commit from
 ```sh
 TAG=v0.6.0-build.23
 SOURCE_COMMIT="$(git rev-list -n 1 "$TAG")"
-BUILDER_COMMIT=<full SHA from .github/workflows/release.yml>
+BUILDER_COMMIT="$(sed -nE 's|.*release-build\.yml@([0-9a-f]{40}).*|\1|p' \
+  .github/workflows/release.yml)"
 
 gh attestation verify Codex-Echo-0.6.0-build.23.zip \
   --repo ohida/codex-echo \
