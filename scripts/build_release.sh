@@ -22,6 +22,10 @@ sha256_file() {
   /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{ print $1 }'
 }
 
+run_codesign() {
+  /usr/bin/codesign "$@"
+}
+
 require_value() {
   local name="$1"
   local value="${(P)name:-}"
@@ -433,15 +437,20 @@ sign_app() {
     fi
   done
 
-  /usr/bin/codesign \
+  run_codesign \
     --force --sign "$identity" --options runtime --timestamp \
     "$signed_paths[1]"
-  /usr/bin/codesign \
+  run_codesign \
     --force --sign "$identity" --options runtime --timestamp \
     --preserve-metadata=entitlements \
     "$signed_paths[2]"
-  for signed_path in "${signed_paths[3,-1]}"; do
-    /usr/bin/codesign \
+  for signed_path in \
+    "$signed_paths[3]" \
+    "$signed_paths[4]" \
+    "$signed_paths[5]" \
+    "$signed_paths[6]"
+  do
+    run_codesign \
       --force --sign "$identity" --options runtime --timestamp \
       "$signed_path"
   done
@@ -910,6 +919,10 @@ sparkle_finalize() {
     "$output_directory/$dmg_name" \
     "$output_directory/appcast.xml"
 }
+
+if [[ "${ZSH_EVAL_CONTEXT:-}" == *:file ]]; then
+  return 0
+fi
 
 if (( $# < 1 )); then
   die "Usage: build_release.sh <prepare-source|apple-finalize|sparkle-finalize> ..."

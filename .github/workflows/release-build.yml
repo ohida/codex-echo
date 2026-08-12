@@ -34,6 +34,9 @@ jobs:
       - name: Test tagged source
         run: /usr/bin/swift test --package-path source
 
+      - name: Test tagged release builder
+        run: source/scripts/test_build_release.sh
+
   source:
     needs: test
     if: >-

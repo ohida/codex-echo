@@ -26,5 +26,8 @@ jobs:
       - name: Run tests
         run: NSUnbufferedIO=YES /usr/bin/swift test
 
+      - name: Test release builder
+        run: ./scripts/test_build_release.sh
+
       - name: Build local app bundle
         run: ./scripts/build_app.sh
