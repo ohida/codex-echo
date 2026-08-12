@@ -51,7 +51,9 @@ the external protocol is missing, malformed, or changes unexpectedly.
 
 Release tags are lightweight tags named `v<version>-build.<build>`. The
 tag-triggered workflow calls the trusted release workflow at a reviewed full
-commit SHA. That pinned workflow:
+commit SHA and explicitly inherits protected signing secrets. The manual Apple
+credential preflight calls that same pinned workflow through the same secret
+boundary before any release tag is created. That pinned workflow:
 
 1. requires workflow attempt 1, an unchanged direct tag, a tagged source commit
    on `main`, and a completed successful aggregate CI run for that exact commit;
