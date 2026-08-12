@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import os
 
 @testable import CodexAppServer
 
@@ -125,6 +126,71 @@ final class CodexAppServerClientTests: XCTestCase {
     )
   }
 
+  func testExecutableLocationUsesTheRegisteredCodexApplicationBundle() {
+    let location = CodexAppServerExecutableLocation(
+      codexApplicationURL: URL(fileURLWithPath: "/Users/example/Applications/Codex.app"),
+      environment: [:]
+    )
+
+    XCTAssertEqual(
+      location.executableURL?.path,
+      "/Users/example/Applications/Codex.app/Contents/Resources/codex"
+    )
+
+    let relocated = CodexAppServerExecutableLocation(
+      codexApplicationURL: URL(fileURLWithPath: "/Volumes/Tools/Codex.app"),
+      environment: [:]
+    )
+    XCTAssertEqual(
+      relocated.executableURL?.path,
+      "/Volumes/Tools/Codex.app/Contents/Resources/codex"
+    )
+  }
+
+  func testExecutableEnvironmentOverrideRemainsFixed() {
+    let location = CodexAppServerExecutableLocation(
+      codexApplicationURL: URL(fileURLWithPath: "/Users/example/Applications/Codex.app"),
+      environment: ["CODEX_EXECUTABLE": "/opt/codex/bin/codex"]
+    )
+
+    XCTAssertEqual(location.executableURL?.path, "/opt/codex/bin/codex")
+    XCTAssertEqual(location.executableURL?.path, "/opt/codex/bin/codex")
+  }
+
+  func testApplicationExecutableSourceResolvesAgainAfterTheBundleMoves() {
+    let applicationURL = OSAllocatedUnfairLock(
+      initialState: URL(fileURLWithPath: "/Users/example/Applications/Codex.app")
+    )
+    let source = CodexAppServerExecutableSource.codexApplication {
+      applicationURL.withLock { $0 }
+    }
+
+    XCTAssertEqual(
+      source.resolve(environment: [:])?.path,
+      "/Users/example/Applications/Codex.app/Contents/Resources/codex"
+    )
+    applicationURL.withLock {
+      $0 = URL(fileURLWithPath: "/Volumes/Tools/Codex.app")
+    }
+    XCTAssertEqual(
+      source.resolve(environment: [:])?.path,
+      "/Volumes/Tools/Codex.app/Contents/Resources/codex"
+    )
+  }
+
+  func testApplicationExecutableSourcePrioritizesTheEnvironmentOverride() {
+    let source = CodexAppServerExecutableSource.codexApplication {
+      URL(fileURLWithPath: "/Users/example/Applications/Codex.app")
+    }
+
+    XCTAssertEqual(
+      source.resolve(
+        environment: ["CODEX_EXECUTABLE": "/opt/codex/bin/codex"]
+      )?.path,
+      "/opt/codex/bin/codex"
+    )
+  }
+
   @MainActor
   func testMissingExecutableProducesSanitizedDiagnostics() async {
     let executableURL = FileManager.default.temporaryDirectory
@@ -214,6 +280,214 @@ final class CodexAppServerClientTests: XCTestCase {
     XCTAssertEqual(snapshot.capacityState, .available)
     XCTAssertEqual(snapshot.connectionFailureCount, 0)
     XCTAssertNil(snapshot.lastFailure)
+  }
+
+  @MainActor
+  func testThreadListPublishesOnlyAfterFollowingPaginationCursor() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executableURL = directory.appendingPathComponent("mock-codex")
+    let script = """
+      #!/bin/sh
+      request_id() {
+        printf '%s' "$1" | sed -E 's/.*"id":([0-9]+).*/\\1/'
+      }
+
+      IFS= read -r initialize
+      initialize_id="$(request_id "$initialize")"
+      printf '{"id":%s,"result":{}}\\n' "$initialize_id"
+      IFS= read -r initialized
+      IFS= read -r first_thread_list
+      IFS= read -r rate_limits
+      first_thread_list_id="$(request_id "$first_thread_list")"
+      rate_limits_id="$(request_id "$rate_limits")"
+      printf '{"id":%s,"result":{"data":[{"id":"thread-1","name":"First"}],"nextCursor":"page-2"}}\\n' "$first_thread_list_id"
+      printf '{"id":%s,"result":{"rateLimits":{"primary":{"usedPercent":12}}}}\\n' "$rate_limits_id"
+      IFS= read -r second_thread_list
+      case "$second_thread_list" in
+        *'"cursor":"page-2"'*) ;;
+        *) exit 3 ;;
+      esac
+      second_thread_list_id="$(request_id "$second_thread_list")"
+      printf '{"id":%s,"result":{"data":[{"id":"thread-2","name":"Second"}],"nextCursor":null}}\\n' "$second_thread_list_id"
+      while IFS= read -r message; do :; done
+      """
+    try Data(script.utf8).write(to: executableURL)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: executableURL.path
+    )
+
+    let client = CodexAppServerClient(
+      executableURL: executableURL,
+      maximumResponseLineByteCount: 1_024,
+      responseTimeout: 2,
+      reconnectDelay: 1
+    )
+    let catalog = expectation(description: "complete paginated catalog")
+    var catalogs: [[CodexThreadDescriptor]] = []
+    client.eventHandler = { event in
+      guard case .threadsChanged(let threads, _) = event else { return }
+      catalogs.append(threads)
+      catalog.fulfill()
+    }
+
+    client.start()
+    await fulfillment(of: [catalog], timeout: 3)
+    client.stop()
+
+    XCTAssertEqual(catalogs.count, 1)
+    XCTAssertEqual(catalogs[0].map(\.id), ["thread-1", "thread-2"])
+  }
+
+  @MainActor
+  func testInvalidThreadListResponseMarksOnlyTheCatalogUnavailable() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executableURL = directory.appendingPathComponent("mock-codex")
+    let script = """
+      #!/bin/sh
+      request_id() {
+        printf '%s' "$1" | sed -E 's/.*"id":([0-9]+).*/\\1/'
+      }
+
+      IFS= read -r initialize
+      initialize_id="$(request_id "$initialize")"
+      printf '{"id":%s,"result":{}}\\n' "$initialize_id"
+      IFS= read -r initialized
+      IFS= read -r first_thread_list
+      IFS= read -r rate_limits
+      first_thread_list_id="$(request_id "$first_thread_list")"
+      rate_limits_id="$(request_id "$rate_limits")"
+      printf '{"id":%s,"result":{"data":[]}}\\n' "$first_thread_list_id"
+      printf '{"id":%s,"result":{"rateLimits":{"primary":{"usedPercent":12}}}}\\n' "$rate_limits_id"
+      IFS= read -r second_thread_list
+      second_thread_list_id="$(request_id "$second_thread_list")"
+      printf '{"id":%s,"error":{"code":-32603,"message":"broken"}}\\n' "$second_thread_list_id"
+      while IFS= read -r message; do :; done
+      """
+    try Data(script.utf8).write(to: executableURL)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: executableURL.path
+    )
+
+    let client = CodexAppServerClient(
+      executableURL: executableURL,
+      maximumResponseLineByteCount: 1_024,
+      responseTimeout: 2,
+      reconnectDelay: 10
+    )
+    let initialCatalog = expectation(description: "initial catalog")
+    let unavailable = expectation(description: "task catalog unavailable")
+    client.eventHandler = { event in
+      switch event {
+      case .threadsChanged:
+        initialCatalog.fulfill()
+      case .taskCatalogUnavailable:
+        unavailable.fulfill()
+      default:
+        break
+      }
+    }
+
+    client.start()
+    await fulfillment(of: [initialCatalog], timeout: 2)
+    client.requestCatalogRefresh()
+    await fulfillment(of: [unavailable], timeout: 2)
+    let snapshot = client.diagnosticsSnapshot()
+    client.stop()
+
+    XCTAssertEqual(snapshot.state, .running)
+    XCTAssertEqual(snapshot.taskCatalogState, .unavailable)
+    XCTAssertEqual(snapshot.capacityState, .available)
+    XCTAssertEqual(snapshot.connectionFailureCount, 0)
+    XCTAssertNil(snapshot.lastFailure)
+  }
+
+  @MainActor
+  func testInvalidRateLimitResponseClearsOnlyCapacity() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executableURL = directory.appendingPathComponent("mock-codex")
+    let script = """
+      #!/bin/sh
+      request_id() {
+        printf '%s' "$1" | sed -E 's/.*"id":([0-9]+).*/\\1/'
+      }
+
+      IFS= read -r initialize
+      initialize_id="$(request_id "$initialize")"
+      printf '{"id":%s,"result":{}}\\n' "$initialize_id"
+      IFS= read -r initialized
+      IFS= read -r thread_list
+      IFS= read -r first_rate_limits
+      thread_list_id="$(request_id "$thread_list")"
+      first_rate_limits_id="$(request_id "$first_rate_limits")"
+      printf '{"id":%s,"result":{"data":[]}}\\n' "$thread_list_id"
+      printf '{"id":%s,"result":{"rateLimits":{"primary":{"usedPercent":12}}}}\\n' "$first_rate_limits_id"
+      IFS= read -r second_rate_limits
+      second_rate_limits_id="$(request_id "$second_rate_limits")"
+      printf '{"id":%s,"error":{"code":-32603,"message":"broken"}}\\n' "$second_rate_limits_id"
+      while IFS= read -r message; do :; done
+      """
+    try Data(script.utf8).write(to: executableURL)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: executableURL.path
+    )
+
+    let client = CodexAppServerClient(
+      executableURL: executableURL,
+      maximumResponseLineByteCount: 1_024,
+      responseTimeout: 2,
+      reconnectDelay: 1
+    )
+    let initialCatalog = expectation(description: "initial catalog")
+    let initialUsage = expectation(description: "initial capacity")
+    let unavailable = expectation(description: "capacity unavailable")
+    client.eventHandler = { event in
+      switch event {
+      case .threadsChanged:
+        initialCatalog.fulfill()
+      case .usageChanged:
+        initialUsage.fulfill()
+      case .usageUnavailable:
+        unavailable.fulfill()
+      default:
+        break
+      }
+    }
+
+    client.start()
+    await fulfillment(of: [initialCatalog, initialUsage], timeout: 2)
+    client.requestUsageRefresh()
+    await fulfillment(of: [unavailable], timeout: 2)
+    let snapshot = client.diagnosticsSnapshot()
+    client.stop()
+
+    XCTAssertEqual(snapshot.state, .running)
+    XCTAssertEqual(snapshot.taskCatalogState, .available)
+    XCTAssertEqual(snapshot.capacityState, .unavailable)
+    XCTAssertEqual(snapshot.connectionFailureCount, 0)
   }
 
   func testMalformedLineIsIsolatedBeforeValidResponses() throws {

@@ -16,6 +16,7 @@ public enum CodexAppServerEvent: Sendable {
     [CodexThreadDescriptor],
     projectPathAliases: [CodexProjectPathAlias] = []
   )
+  case taskCatalogUnavailable
   case usageChanged(CodexUsageSnapshot)
   case usageUnavailable
 }
@@ -114,11 +115,65 @@ private enum CodexAppServerRequestSlot: Hashable {
   case rateLimits
 }
 
+enum CodexAppServerExecutableLocation: Equatable {
+  case unavailable
+  case available(URL)
+
+  init(
+    codexApplicationURL: URL?,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) {
+    if let override = environment["CODEX_EXECUTABLE"], !override.isEmpty {
+      self = .available(URL(fileURLWithPath: override))
+    } else if let codexApplicationURL {
+      self = .available(
+        codexApplicationURL.appendingPathComponent(
+          "Contents/Resources/codex",
+          isDirectory: false
+        )
+      )
+    } else {
+      self = .unavailable
+    }
+  }
+
+  var executableURL: URL? {
+    switch self {
+    case .unavailable: nil
+    case .available(let executableURL): executableURL
+    }
+  }
+}
+
+enum CodexAppServerExecutableSource: Sendable {
+  case fixed(URL)
+  case codexApplication(@Sendable () -> URL?)
+
+  func resolve(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) -> URL? {
+    switch self {
+    case .fixed(let executableURL):
+      return executableURL
+    case .codexApplication(let applicationURLResolver):
+      if let override = environment["CODEX_EXECUTABLE"], !override.isEmpty {
+        return URL(fileURLWithPath: override)
+      }
+      return CodexAppServerExecutableLocation(
+        codexApplicationURL: applicationURLResolver(),
+        environment: [:]
+      ).executableURL
+    }
+  }
+}
+
 // SAFETY: Mutable process and request state is confined to `queue`. Process and
 // file-handle callbacks re-enter that queue, while the event handler uses its
 // own lock-backed storage.
 public final class CodexAppServerClient: @unchecked Sendable {
   private typealias EventHandler = @MainActor @Sendable (CodexAppServerEvent) -> Void
+  private static let maximumThreadListPageCount = 100
+  private static let maximumThreadDescriptorCount = 10_000
 
   private let eventHandlerStorage = OSAllocatedUnfairLock<EventHandler?>(initialState: nil)
 
@@ -127,7 +182,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
     set { eventHandlerStorage.withLock { $0 = newValue } }
   }
 
-  private let executableURL: URL
+  private let executableSource: CodexAppServerExecutableSource
   private let responseTimeout: TimeInterval
   private let reconnectDelay: TimeInterval
   private let terminationGracePeriod: TimeInterval
@@ -149,6 +204,10 @@ public final class CodexAppServerClient: @unchecked Sendable {
   private var catalogRefreshRequested = false
   private var usageRefreshRequested = false
   private var latestUsageSnapshot: CodexUsageSnapshot?
+  private var pendingThreadDescriptors: [CodexThreadDescriptor] = []
+  private var pendingThreadProjectState: CodexDesktopProjectStateSnapshot?
+  private var seenThreadListCursors = Set<String>()
+  private var threadListPageCount = 0
   private var usagePollingPolicy = CodexUsagePollingPolicy()
   private var pollWorkItem: DispatchWorkItem?
   private var usagePollWorkItem: DispatchWorkItem?
@@ -166,11 +225,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
   private var launchedExecutableFingerprint: CodexAppServerExecutableFingerprint?
   private var activeEventGeneration: UInt64 = 0
 
-  public convenience init(
-    executableURL: URL = CodexAppServerClient.defaultExecutableURL
-  ) {
+  public convenience init(executableURL: URL) {
     self.init(
-      executableURL: executableURL,
+      executableSource: .fixed(executableURL),
       maximumResponseLineByteCount: 8 * 1_024 * 1_024,
       responseTimeout: 15,
       reconnectDelay: 2,
@@ -178,17 +235,45 @@ public final class CodexAppServerClient: @unchecked Sendable {
     )
   }
 
-  init(
+  public convenience init(
+    codexApplicationURLResolver: @escaping @Sendable () -> URL?
+  ) {
+    self.init(
+      executableSource: .codexApplication(codexApplicationURLResolver),
+      maximumResponseLineByteCount: 8 * 1_024 * 1_024,
+      responseTimeout: 15,
+      reconnectDelay: 2,
+      terminationGracePeriod: 1
+    )
+  }
+
+  convenience init(
     executableURL: URL,
     maximumResponseLineByteCount: Int,
     responseTimeout: TimeInterval,
     reconnectDelay: TimeInterval,
     terminationGracePeriod: TimeInterval = 1
   ) {
+    self.init(
+      executableSource: .fixed(executableURL),
+      maximumResponseLineByteCount: maximumResponseLineByteCount,
+      responseTimeout: responseTimeout,
+      reconnectDelay: reconnectDelay,
+      terminationGracePeriod: terminationGracePeriod
+    )
+  }
+
+  private init(
+    executableSource: CodexAppServerExecutableSource,
+    maximumResponseLineByteCount: Int,
+    responseTimeout: TimeInterval,
+    reconnectDelay: TimeInterval,
+    terminationGracePeriod: TimeInterval
+  ) {
     precondition(responseTimeout > 0)
     precondition(reconnectDelay >= 0)
     precondition(terminationGracePeriod > 0)
-    self.executableURL = executableURL
+    self.executableSource = executableSource
     self.responseTimeout = responseTimeout
     self.reconnectDelay = reconnectDelay
     self.terminationGracePeriod = terminationGracePeriod
@@ -207,13 +292,6 @@ public final class CodexAppServerClient: @unchecked Sendable {
       process,
       after: terminationGracePeriod
     )
-  }
-
-  public static var defaultExecutableURL: URL {
-    if let override = ProcessInfo.processInfo.environment["CODEX_EXECUTABLE"], !override.isEmpty {
-      return URL(fileURLWithPath: override)
-    }
-    return URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex")
   }
 
   static func clientVersion(infoDictionary: [String: Any]?) -> String {
@@ -321,7 +399,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
     activeEventGeneration = eventDeliveryGate.beginGeneration()
     diagnosticsState = .starting
     emit(.connectionStateChanged(.starting))
-    guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+    guard let executableURL = executableSource.resolve(),
+      FileManager.default.isExecutableFile(atPath: executableURL.path)
+    else {
       failAndReconnectLocked(
         CodexAppServerDiagnosticsFailure(
           phase: .executableValidation,
@@ -415,6 +495,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
     diagnosticsTaskCatalogState = .notRequested
     diagnosticsCapacityState = .notRequested
     latestUsageSnapshot = nil
+    resetPendingThreadListLocked()
     usagePollingPolicy.reset()
     usagePollWorkItem?.cancel()
     usageResetWorkItem?.cancel()
@@ -515,6 +596,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
     catalogRefreshRequested = false
     usageRefreshRequested = false
     latestUsageSnapshot = nil
+    resetPendingThreadListLocked()
     usagePollingPolicy.reset()
     usagePollWorkItem?.cancel()
     usageResetWorkItem?.cancel()
@@ -633,19 +715,28 @@ public final class CodexAppServerClient: @unchecked Sendable {
     requestRateLimitsLocked()
   }
 
-  private func requestThreadListLocked() {
+  private func requestThreadListLocked(cursor: String? = nil) {
     guard running, process?.isRunning == true, listRequestID == nil else { return }
     if restartIfExecutableChangedLocked() { return }
+    if cursor == nil {
+      resetPendingThreadListLocked()
+      pendingThreadProjectState = desktopProjectStateReader.snapshot()
+    }
+    var params: [String: Any] = [
+      "limit": 100,
+      "sortKey": "recency_at",
+      "sortDirection": "desc",
+      "modelProviders": [],
+      "sourceKinds": ["cli", "vscode", "appServer"],
+      "archived": false,
+    ]
+    if let cursor {
+      params["cursor"] = cursor
+    }
     listRequestID = sendRequestLocked(
       method: "thread/list",
-      params: [
-        "limit": 100,
-        "sortKey": "recency_at",
-        "sortDirection": "desc",
-        "modelProviders": [],
-        "sourceKinds": ["cli", "vscode", "appServer"],
-        "archived": false,
-      ])
+      params: params
+    )
     scheduleResponseTimeoutLocked(
       requestID: listRequestID,
       slot: .threadList,
@@ -659,26 +750,71 @@ public final class CodexAppServerClient: @unchecked Sendable {
   private func handleListResponseLocked(_ message: [String: Any]) {
     cancelResponseTimeoutLocked(for: .threadList)
     listRequestID = nil
-    if let result = message["result"] as? [String: Any], let data = result["data"] as? [Any] {
-      let desktopProjectState = desktopProjectStateReader.snapshot()
-      let threads: [CodexThreadDescriptor] = data.compactMap {
-        guard let object = $0 as? [String: Any], let threadID = object["id"] as? String
-        else { return nil }
-        return CodexThreadDescriptor(
+    guard let result = message["result"] as? [String: Any],
+      let data = result["data"] as? [Any],
+      let desktopProjectState = pendingThreadProjectState
+    else {
+      markTaskCatalogUnavailableLocked()
+      return
+    }
+
+    var pageDescriptors: [CodexThreadDescriptor] = []
+    pageDescriptors.reserveCapacity(data.count)
+    for value in data {
+      guard let object = value as? [String: Any],
+        let threadID = object["id"] as? String,
+        let descriptor = CodexThreadDescriptor(
           object: object,
           projectContext: desktopProjectState.projectContext(for: threadID)
         )
+      else {
+        markTaskCatalogUnavailableLocked()
+        return
       }
-      emit(
-        .threadsChanged(
-          threads,
-          projectPathAliases: desktopProjectState.projectPathAliases
-        )
-      )
-      diagnosticsTaskCatalogState = .available
-    } else if diagnosticsTaskCatalogState != .available {
-      diagnosticsTaskCatalogState = .unavailable
+      pageDescriptors.append(descriptor)
     }
+    guard
+      pageDescriptors.count
+        <= Self.maximumThreadDescriptorCount - pendingThreadDescriptors.count
+    else {
+      markTaskCatalogUnavailableLocked()
+      return
+    }
+    pendingThreadDescriptors.append(contentsOf: pageDescriptors)
+    threadListPageCount += 1
+
+    let nextCursor: String?
+    switch result["nextCursor"] {
+    case nil, is NSNull:
+      nextCursor = nil
+    case let cursor as String:
+      nextCursor = cursor
+    default:
+      markTaskCatalogUnavailableLocked()
+      return
+    }
+
+    if let nextCursor {
+      guard threadListPageCount < Self.maximumThreadListPageCount,
+        seenThreadListCursors.insert(nextCursor).inserted
+      else {
+        markTaskCatalogUnavailableLocked()
+        return
+      }
+      requestThreadListLocked(cursor: nextCursor)
+      return
+    }
+
+    let threads = pendingThreadDescriptors
+    let projectPathAliases = desktopProjectState.projectPathAliases
+    resetPendingThreadListLocked()
+    emit(
+      .threadsChanged(
+        threads,
+        projectPathAliases: projectPathAliases
+      )
+    )
+    diagnosticsTaskCatalogState = .available
     if catalogRefreshRequested {
       catalogRefreshRequested = false
       requestThreadListLocked()
@@ -706,16 +842,26 @@ public final class CodexAppServerClient: @unchecked Sendable {
   private func handleRateLimitsResponseLocked(_ message: [String: Any]) {
     cancelResponseTimeoutLocked(for: .rateLimits)
     rateLimitsRequestID = nil
-    if let result = message["result"] as? [String: Any],
+    guard let result = message["result"] as? [String: Any],
       let usage = CodexUsageSnapshot.readResult(result)
-    {
-      acceptUsageLocked(
-        usage.preservingKnownResetCredits(from: latestUsageSnapshot)
-      )
-    } else if latestUsageSnapshot == nil {
+    else {
+      latestUsageSnapshot = nil
+      usagePollingPolicy.reset()
+      usageResetWorkItem?.cancel()
+      usageResetWorkItem = nil
       diagnosticsCapacityState = .unavailable
       emit(.usageUnavailable)
+      if usageRefreshRequested {
+        usageRefreshRequested = false
+        requestRateLimitsLocked()
+      } else {
+        scheduleUsagePollLocked()
+      }
+      return
     }
+    acceptUsageLocked(
+      usage.preservingKnownResetCredits(from: latestUsageSnapshot)
+    )
     if usageRefreshRequested {
       usageRefreshRequested = false
       requestRateLimitsLocked()
@@ -763,6 +909,25 @@ public final class CodexAppServerClient: @unchecked Sendable {
       workItem.cancel()
     }
     responseTimeoutWorkItems.removeAll(keepingCapacity: false)
+  }
+
+  private func resetPendingThreadListLocked() {
+    pendingThreadDescriptors.removeAll(keepingCapacity: false)
+    pendingThreadProjectState = nil
+    seenThreadListCursors.removeAll(keepingCapacity: false)
+    threadListPageCount = 0
+  }
+
+  private func markTaskCatalogUnavailableLocked() {
+    resetPendingThreadListLocked()
+    diagnosticsTaskCatalogState = .unavailable
+    emit(.taskCatalogUnavailable)
+    if catalogRefreshRequested {
+      catalogRefreshRequested = false
+      requestThreadListLocked()
+    } else {
+      schedulePollLocked()
+    }
   }
 
   private func requestIDLocked(for slot: CodexAppServerRequestSlot) -> Int? {
@@ -854,6 +1019,7 @@ public final class CodexAppServerClient: @unchecked Sendable {
   @discardableResult
   private func restartIfExecutableChangedLocked() -> Bool {
     guard running, process != nil else { return false }
+    guard let executableURL = executableSource.resolve() else { return false }
     let currentFingerprint = CodexAppServerExecutableFingerprint(
       executableURL: executableURL
     )

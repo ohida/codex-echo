@@ -45,6 +45,18 @@ final class CodexTaskCatalogTests: XCTestCase {
     XCTAssertFalse(catalog.admits("another"))
   }
 
+  func testReplacementKeepsTheFirstDescriptorForADuplicateExternalID() throws {
+    var catalog = CodexTaskCatalog()
+    let newest = try descriptor(id: "duplicate", title: "Newest")
+    let older = try descriptor(id: "duplicate", title: "Older")
+
+    XCTAssertEqual(catalog.replace(with: [newest, older]), ["duplicate"])
+
+    XCTAssertEqual(catalog.authoritativeIDs, ["duplicate"])
+    XCTAssertEqual(catalog.descriptor(for: "duplicate"), newest)
+    XCTAssertTrue(catalog.admits("duplicate"))
+  }
+
   private func descriptor(id: String, title: String) throws -> CodexThreadDescriptor {
     try XCTUnwrap(
       CodexThreadDescriptor(

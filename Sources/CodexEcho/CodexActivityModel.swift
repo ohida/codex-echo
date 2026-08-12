@@ -603,7 +603,7 @@ final class CodexActivityModel: ObservableObject {
 
   init(
     ipcClient: CodexIPCClient = CodexIPCClient(),
-    appServerClient: CodexAppServerClient = CodexAppServerClient(),
+    appServerClient: CodexAppServerClient? = nil,
     desktopAppController: any CodexDesktopAppControlling = CodexDesktopAppController(),
     settings: MenuBarSettings = MenuBarSettings(),
     userDefaults: UserDefaults = .standard,
@@ -612,7 +612,13 @@ final class CodexActivityModel: ObservableObject {
     startsTransportClients: Bool = true
   ) {
     self.ipcClient = ipcClient
-    self.appServerClient = appServerClient
+    self.appServerClient = appServerClient ?? CodexAppServerClient(
+      codexApplicationURLResolver: {
+        NSWorkspace.shared.urlForApplication(
+          withBundleIdentifier: CodexDesktopAppController.bundleIdentifier
+        )
+      }
+    )
     self.desktopAppController = desktopAppController
     self.desktopAppState = desktopAppController.state
     self.settings = settings
@@ -625,7 +631,9 @@ final class CodexActivityModel: ObservableObject {
     self.customizationStore =
       customizationStore ?? TaskCustomizationStore(userDefaults: userDefaults)
     ipcClient.eventHandler = { [weak self] event in self?.handleIPCEvent(event) }
-    appServerClient.eventHandler = { [weak self] event in self?.handleAppServerEvent(event) }
+    self.appServerClient.eventHandler = { [weak self] event in
+      self?.handleAppServerEvent(event)
+    }
     desktopAppController.stateDidChange = { [weak self] state in
       self?.handleDesktopAppStateChange(state)
     }
@@ -744,7 +752,7 @@ final class CodexActivityModel: ObservableObject {
     desktopAppController.start()
     if startsTransportClients {
       ipcClient.start()
-      appServerClient.start()
+      self.appServerClient.start()
     }
   }
 
@@ -1098,12 +1106,16 @@ final class CodexActivityModel: ObservableObject {
         codexUsageAvailability = .unavailable
       }
     case .threadsChanged(let threads, let projectPathAliases):
+      appServerConnectionState = .running
       migrateProjectCustomizationAliases(projectPathAliases)
       let catalogIDs = taskCatalog.replace(with: threads)
       removeConversationsMissingFromCatalog(catalogIDs)
       ipcClient.setSubscriptions(catalogIDs)
       rebuildTasks()
       taskCatalogSnapshot = CodexTaskCatalogSnapshot(threads: threads)
+    case .taskCatalogUnavailable:
+      appServerConnectionState = .failed(message: "Codex task list unavailable")
+      taskCatalogSnapshot = nil
     case .usageChanged(let usage):
       codexUsageSnapshot = usage
       codexUsageAvailability = .available

@@ -75,7 +75,7 @@ private final class SystemCodexDesktopAppWorkspace: CodexDesktopAppWorkspace {
 
 @MainActor
 final class CodexDesktopAppController: NSObject, CodexDesktopAppControlling {
-  static let bundleIdentifier = "com.openai.codex"
+  nonisolated static let bundleIdentifier = "com.openai.codex"
 
   private let workspace: any CodexDesktopAppWorkspace
   private var isStarted = false

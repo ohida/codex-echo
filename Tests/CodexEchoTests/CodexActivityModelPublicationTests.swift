@@ -152,6 +152,48 @@ final class CodexActivityModelPublicationTests: XCTestCase {
     XCTAssertEqual(model.tasks.map(\.id), ["known"])
   }
 
+  @MainActor
+  func testUnavailableCatalogDegradesUntilAnAuthoritativeCatalogRecovers() throws {
+    let suiteName = "CodexActivityModelPublicationTests-\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let ipcClient = CodexIPCClient()
+    let appServerClient = CodexAppServerClient(
+      executableURL: URL(fileURLWithPath: "/usr/bin/false")
+    )
+    let model = CodexActivityModel(
+      ipcClient: ipcClient,
+      appServerClient: appServerClient,
+      desktopAppController: PublicationTestDesktopAppController(),
+      settings: MenuBarSettings(userDefaults: defaults),
+      userDefaults: defaults,
+      startsTransportClients: false
+    )
+    let known = try XCTUnwrap(
+      CodexThreadDescriptor(
+        object: [
+          "id": "known",
+          "name": "Known",
+        ]
+      )
+    )
+
+    ipcClient.eventHandler?(.connectionStateChanged(.connected))
+    appServerClient.eventHandler?(.connectionStateChanged(.running))
+    appServerClient.eventHandler?(.threadsChanged([known]))
+    XCTAssertEqual(model.connectionHealth, .live)
+    XCTAssertEqual(model.taskCatalogSnapshot?.taskIDs, ["known"])
+
+    appServerClient.eventHandler?(.taskCatalogUnavailable)
+    XCTAssertEqual(model.connectionHealth, .degraded(.taskCatalogUnavailable))
+    XCTAssertNil(model.taskCatalogSnapshot)
+
+    appServerClient.eventHandler?(.threadsChanged([known]))
+    XCTAssertEqual(model.connectionHealth, .live)
+    XCTAssertEqual(model.taskCatalogSnapshot?.taskIDs, ["known"])
+  }
+
   private func workingConversationState(
     id: String = "thread-1",
     title: String

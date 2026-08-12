@@ -19,9 +19,13 @@ struct CodexTaskCatalog {
 
   @discardableResult
   mutating func replace(with descriptors: [CodexThreadDescriptor]) -> Set<String> {
-    descriptorsByID = Dictionary(
-      uniqueKeysWithValues: descriptors.map { ($0.id, $0) }
-    )
+    descriptorsByID = descriptors.reduce(into: [:]) { result, descriptor in
+      // thread/list is ordered newest-first, so preserve the first descriptor if
+      // an invalid external response repeats an ID.
+      if result[descriptor.id] == nil {
+        result[descriptor.id] = descriptor
+      }
+    }
     hasAuthoritativeSnapshot = true
     return Set(descriptorsByID.keys)
   }
