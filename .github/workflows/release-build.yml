@@ -34,8 +34,13 @@ jobs:
       - name: Test tagged source
         run: /usr/bin/swift test --package-path source
 
-      - name: Test tagged release builder
-        run: source/scripts/test_build_release.sh
+      - name: Build tagged app bundle
+        run: source/scripts/build_app.sh
+
+      - name: Test tagged release builder with the built app
+        run: >-
+          source/scripts/test_build_release.sh
+          "source/.build/app/Codex Echo.app"
 
   source:
     needs: test

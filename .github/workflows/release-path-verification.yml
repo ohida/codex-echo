@@ -1,0 +1,29 @@
+name: Release path verification
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dmg:
+    name: Production DMG path (${{ matrix.instance }})
+    strategy:
+      fail-fast: false
+      matrix:
+        instance: [1, 2, 3]
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the complete app bundle
+        run: ./scripts/build_app.sh
+
+      - name: Exercise the production DMG path three times
+        run: ./scripts/test_build_release.sh ".build/app/Codex Echo.app"

@@ -26,6 +26,21 @@ run_codesign() {
   /usr/bin/codesign "$@"
 }
 
+create_dmg() {
+  if (( $# != 2 )); then
+    die "Usage: create_dmg <source-folder> <output-path>"
+  fi
+  local source_folder="$1"
+  local output_path="$2"
+
+  /usr/bin/hdiutil create \
+    -volname "Codex Echo" \
+    -srcfolder "$source_folder" \
+    -format UDZO \
+    -ov \
+    "$output_path" >/dev/null
+}
+
 require_value() {
   local name="$1"
   local value="${(P)name:-}"
@@ -678,12 +693,7 @@ apple_finalize() {
   /usr/bin/ditto "$app" "$dmg_root/Codex Echo.app"
   /bin/ln -s /Applications "$dmg_root/Applications"
   final_dmg="$output_directory/Codex-Echo-$RELEASE_VERSION-build.$RELEASE_BUILD.dmg"
-  /usr/bin/hdiutil create \
-    -volname "Codex Echo" \
-    -srcfolder "$dmg_root" \
-    -format UDZO \
-    -ov \
-    "$final_dmg" >/dev/null
+  create_dmg "$dmg_root" "$final_dmg"
   /usr/bin/codesign \
     --force \
     --sign "$CODE_SIGN_IDENTITY" \
