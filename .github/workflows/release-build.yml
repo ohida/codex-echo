@@ -2,12 +2,19 @@ name: Trusted release build
 
 on:
   workflow_call:
+    inputs:
+      credential_preflight:
+        description: Validate the Apple signing credential without building artifacts.
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
 jobs:
   test:
     if: >-
+      !inputs.credential_preflight &&
       github.repository == 'ohida/codex-echo' &&
       github.event_name == 'push' &&
       github.run_attempt == 1 &&
@@ -30,6 +37,7 @@ jobs:
   source:
     needs: test
     if: >-
+      !inputs.credential_preflight &&
       needs.test.result == 'success' &&
       github.repository == 'ohida/codex-echo' &&
       github.event_name == 'push' &&
@@ -108,7 +116,10 @@ jobs:
 
   apple:
     needs: source
-    if: needs.source.result == 'success' && github.run_attempt == 1
+    if: >-
+      !inputs.credential_preflight &&
+      needs.source.result == 'success' &&
+      github.run_attempt == 1
     runs-on: macos-15
     timeout-minutes: 90
     environment: release-apple-signing
@@ -195,9 +206,54 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+  developer-id:
+    if: >-
+      inputs.credential_preflight &&
+      github.repository == 'ohida/codex-echo' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      github.actor == 'ohida' &&
+      github.triggering_actor == 'ohida'
+    runs-on: macos-15
+    timeout-minutes: 10
+    environment: release-apple-signing
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: builder
+          persist-credentials: false
+
+      - name: Validate Developer ID credential
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        shell: bash
+        run: >-
+          /bin/bash builder/scripts/import_developer_id.sh
+          "$RUNNER_TEMP/developer-id.p12"
+          "$RUNNER_TEMP/codex-echo-signing.keychain-db"
+
+      - name: Remove Apple credentials
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          /usr/bin/security delete-keychain \
+            "$RUNNER_TEMP/codex-echo-signing.keychain-db" 2>/dev/null || true
+          /bin/rm -f -- "$RUNNER_TEMP/developer-id.p12"
+
   sparkle:
     needs: apple
-    if: needs.apple.result == 'success' && github.run_attempt == 1
+    if: >-
+      !inputs.credential_preflight &&
+      needs.apple.result == 'success' &&
+      github.run_attempt == 1
     runs-on: macos-15
     timeout-minutes: 30
     environment: release-sparkle-signing
@@ -242,7 +298,10 @@ jobs:
 
   attest:
     needs: sparkle
-    if: needs.sparkle.result == 'success' && github.run_attempt == 1
+    if: >-
+      !inputs.credential_preflight &&
+      needs.sparkle.result == 'success' &&
+      github.run_attempt == 1
     runs-on: macos-15
     timeout-minutes: 20
     permissions:
