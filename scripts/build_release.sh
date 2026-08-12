@@ -34,6 +34,13 @@ wait_for_dmg_retry() {
   /bin/sleep "$1"
 }
 
+sparkle_download_url_prefix() {
+  if (( $# != 1 )); then
+    die "Usage: sparkle_download_url_prefix <source-commit>"
+  fi
+  print -rn -- "$immutable_download_root/$1/"
+}
+
 create_dmg() {
   if (( $# != 2 )); then
     die "Usage: create_dmg <source-folder> <output-path>"
@@ -817,6 +824,8 @@ sparkle_finalize() {
   local enclosure_signature
   local enclosure_length
   local archive_length
+  local download_url_prefix
+  local expected_enclosure_url
 
   apple_directory="$(existing_directory "$1" "Apple artifact directory")"
   identity="$apple_directory/apple-identity.json"
@@ -871,10 +880,11 @@ sparkle_finalize() {
   appcast_root="$staging_root/appcast"
   /bin/mkdir -p "$appcast_root"
   /bin/cp "$zip_path" "$appcast_root/$zip_name"
+  download_url_prefix="$(sparkle_download_url_prefix "$SOURCE_COMMIT")"
   print -rn -- "$sparkle_private_key" \
     | "$generate_appcast" \
       --ed-key-file - \
-      --download-url-prefix "$immutable_download_root/$SOURCE_COMMIT" \
+      --download-url-prefix "$download_url_prefix" \
       --full-release-notes-url "$official_repository_url/releases/tag/$RELEASE_TAG" \
       --link "$official_repository_url" \
       --maximum-deltas 0 \
@@ -897,11 +907,15 @@ sparkle_finalize() {
     'string((//*[local-name()="enclosure"])[1]/@length)' \
     "$appcast_path")"
   archive_length="$(/usr/bin/stat -f '%z' "$zip_path")"
-  if [[ "$enclosure_url" != "$immutable_download_root/$SOURCE_COMMIT/$zip_name" \
-    || -z "$enclosure_signature" \
-    || "$enclosure_length" != "$archive_length" ]]
-  then
-    die "Appcast enclosure does not match the signed ZIP."
+  expected_enclosure_url="$immutable_download_root/$SOURCE_COMMIT/$zip_name"
+  if [[ "$enclosure_url" != "$expected_enclosure_url" ]]; then
+    die "Appcast enclosure URL does not match the immutable release URL."
+  fi
+  if [[ -z "$enclosure_signature" ]]; then
+    die "Appcast enclosure is missing its EdDSA signature."
+  fi
+  if [[ "$enclosure_length" != "$archive_length" ]]; then
+    die "Appcast enclosure length does not match the signed ZIP."
   fi
   if [[ "$(/usr/bin/xmllint --xpath \
     'string((//*[local-name()="item"])[1]/*[local-name()="version"])' \

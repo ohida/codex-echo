@@ -25,6 +25,32 @@ fi
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-echo-release-builder.XXXXXX")"
 trap '/bin/rm -rf -- "$fixture_root"' EXIT
 
+url_fixture_commit="0123456789abcdef0123456789abcdef01234567"
+expected_url_prefix="$immutable_download_root/$url_fixture_commit/"
+actual_url_prefix="$(sparkle_download_url_prefix "$url_fixture_commit")"
+if [[ "$actual_url_prefix" != "$expected_url_prefix" ]]
+then
+  fail_test "Sparkle download URL prefix must preserve the source commit path."
+fi
+url_fixture_archive="Codex-Echo-URL-Fixture.zip"
+resolved_archive_url="$(
+  SPARKLE_URL_PREFIX="$actual_url_prefix" \
+  SPARKLE_ARCHIVE_NAME="$url_fixture_archive" \
+    /usr/bin/swift -e '
+      import Foundation
+
+      let environment = ProcessInfo.processInfo.environment
+      let prefix = URL(string: environment["SPARKLE_URL_PREFIX"]!)!
+      let archive = environment["SPARKLE_ARCHIVE_NAME"]!
+      print(URL(string: archive, relativeTo: prefix)!.absoluteString)
+    '
+)"
+if [[ "$resolved_archive_url" \
+  != "$immutable_download_root/$url_fixture_commit/$url_fixture_archive" ]]
+then
+  fail_test "Sparkle download URL prefix resolves outside the source commit path."
+fi
+
 cleanup_fixture="$fixture_root/Cleanup Path With Spaces"
 /bin/mkdir -p "$cleanup_fixture"
 /bin/zsh -c '
