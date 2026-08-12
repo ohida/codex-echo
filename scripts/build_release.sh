@@ -26,19 +26,54 @@ run_codesign() {
   /usr/bin/codesign "$@"
 }
 
+run_hdiutil() {
+  /usr/bin/hdiutil "$@"
+}
+
+wait_for_dmg_retry() {
+  /bin/sleep "$1"
+}
+
 create_dmg() {
   if (( $# != 2 )); then
     die "Usage: create_dmg <source-folder> <output-path>"
   fi
   local source_folder="$1"
   local output_path="$2"
+  local attempt=1
+  local maximum_attempts=3
 
-  /usr/bin/hdiutil create \
-    -volname "Codex Echo" \
-    -srcfolder "$source_folder" \
-    -format UDZO \
-    -ov \
-    "$output_path" >/dev/null
+  while (( attempt <= maximum_attempts )); do
+    /bin/rm -f -- "$output_path"
+    if run_hdiutil create \
+      -volname "Codex Echo" \
+      -srcfolder "$source_folder" \
+      -format UDZO \
+      -ov \
+      "$output_path" >/dev/null
+    then
+      return 0
+    fi
+
+    /bin/rm -f -- "$output_path"
+    if (( attempt == maximum_attempts )); then
+      break
+    fi
+    print -u2 -- \
+      "hdiutil create failed on attempt $attempt; retrying."
+    wait_for_dmg_retry 2
+    (( attempt += 1 ))
+  done
+
+  die "hdiutil create failed after $maximum_attempts attempts."
+}
+
+install_directory_cleanup_trap() {
+  if (( $# != 1 )); then
+    die "Usage: install_directory_cleanup_trap <directory>"
+  fi
+  local directory="$1"
+  trap "/bin/rm -rf -- ${(q)directory}" EXIT
 }
 
 require_value() {
@@ -582,10 +617,7 @@ apple_finalize() {
   require_empty_destination "$output_directory"
 
   staging_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-echo-release.XXXXXX")"
-  cleanup_apple() {
-    /bin/rm -rf -- "$staging_root"
-  }
-  trap cleanup_apple EXIT
+  install_directory_cleanup_trap "$staging_root"
   sparkle_root="$staging_root/sparkle"
   download_sparkle "$sparkle_root"
   sparkle_framework="$sparkle_root/extracted/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
@@ -828,10 +860,7 @@ sparkle_finalize() {
   require_empty_destination "$output_directory"
 
   staging_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-echo-appcast.XXXXXX")"
-  cleanup_sparkle() {
-    /bin/rm -rf -- "$staging_root"
-  }
-  trap cleanup_sparkle EXIT
+  install_directory_cleanup_trap "$staging_root"
   sparkle_root="$staging_root/sparkle"
   download_sparkle "$sparkle_root"
   generate_appcast="$sparkle_root/extracted/bin/generate_appcast"

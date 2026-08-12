@@ -25,6 +25,61 @@ fi
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-echo-release-builder.XXXXXX")"
 trap '/bin/rm -rf -- "$fixture_root"' EXIT
 
+cleanup_fixture="$fixture_root/Cleanup Path With Spaces"
+/bin/mkdir -p "$cleanup_fixture"
+/bin/zsh -c '
+  source "$1"
+  cleanup_scope() {
+    local staging_root="$1"
+    install_directory_cleanup_trap "$staging_root"
+  }
+  cleanup_scope "$2"
+' -- "$script_directory/build_release.sh" "$cleanup_fixture"
+if [[ -e "$cleanup_fixture" ]]; then
+  fail_test "Release staging cleanup did not survive function scope exit."
+fi
+
+dmg_retry_source="$fixture_root/DMG Retry Source"
+dmg_retry_output="$fixture_root/DMG Retry.dmg"
+/bin/mkdir -p "$dmg_retry_source"
+/bin/zsh -c '
+  source "$1"
+  typeset -gi attempts=0
+  run_hdiutil() {
+    (( attempts += 1 ))
+    local output_path="${@[-1]}"
+    if [[ -e "$output_path" ]]; then
+      return 90
+    fi
+    /usr/bin/touch "$output_path"
+    (( attempts >= 3 ))
+  }
+  wait_for_dmg_retry() {
+    :
+  }
+  create_dmg "$2" "$3"
+  [[ "$attempts" == 3 && -f "$3" ]]
+' -- "$script_directory/build_release.sh" "$dmg_retry_source" "$dmg_retry_output"
+
+dmg_failure_output="$fixture_root/DMG Failure.dmg"
+if /bin/zsh -c '
+  source "$1"
+  run_hdiutil() {
+    /usr/bin/touch "${@[-1]}"
+    return 1
+  }
+  wait_for_dmg_retry() {
+    :
+  }
+  create_dmg "$2" "$3"
+' -- "$script_directory/build_release.sh" "$dmg_retry_source" "$dmg_failure_output"
+then
+  fail_test "DMG creation succeeded after every hdiutil attempt failed."
+fi
+if [[ -e "$dmg_failure_output" ]]; then
+  fail_test "Failed DMG output was not removed after retry exhaustion."
+fi
+
 fixture_app="$fixture_root/Path With Spaces/Codex Echo.app"
 framework="$fixture_app/Contents/Frameworks/Sparkle.framework"
 framework_version="$framework/Versions/B"
