@@ -69,6 +69,12 @@ The signing environments require an explicit owner approval before credentials
 are exposed. A failed release workflow is not rerun; the next attempt uses a
 higher build number and a new immutable tag.
 
+Before creating a release tag, the operator runs the manual Apple credential
+preflight on `main`. It uses the same protected environment, macOS runner, and
+Developer ID import script as the release build, but creates no release tag or
+artifact. Only a successful first-attempt preflight for the reviewed builder
+commit is valid for the next release start.
+
 The pinned workflow completes its native-signature, notarization, and appcast
 integrity checks before attesting the exact files. The release promoter accepts
 only files whose attestations bind them to the release tag and pinned workflow.
