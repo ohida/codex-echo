@@ -369,6 +369,22 @@ jobs:
           /usr/bin/codesign --verify --verbose=4 "$dmg"
           /usr/bin/xcrun stapler validate "$dmg"
           /usr/bin/xmllint --noout "$appcast"
+          expected_history="https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME"
+          [[ "$(/usr/bin/xmllint --xpath \
+            'count((//*[local-name()="item"])[1]/*[local-name()="description"])' \
+            "$appcast")" == "1" ]]
+          [[ "$(/usr/bin/xmllint --xpath \
+            'string((//*[local-name()="item"])[1]/*[local-name()="description"]/@*[local-name()="format"])' \
+            "$appcast")" == "markdown" ]]
+          [[ -n "$(/usr/bin/xmllint --xpath \
+            'string((//*[local-name()="item"])[1]/*[local-name()="description"])' \
+            "$appcast")" ]]
+          [[ "$(/usr/bin/xmllint --xpath \
+            'count((//*[local-name()="item"])[1]/*[local-name()="releaseNotesLink"])' \
+            "$appcast")" == "0" ]]
+          [[ "$(/usr/bin/xmllint --xpath \
+            'string((//*[local-name()="item"])[1]/*[local-name()="fullReleaseNotesLink"])' \
+            "$appcast")" == "$expected_history" ]]
 
       - name: Attest exact release bytes
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2

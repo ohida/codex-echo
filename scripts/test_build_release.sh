@@ -22,8 +22,37 @@ then
 fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$verification_app"
 
+release_version="$(/usr/libexec/PlistBuddy \
+  -c 'Print :CFBundleShortVersionString' \
+  "$verification_app/Contents/Info.plist")"
+release_notes="$script_directory/../release-notes/$release_version.md"
+validate_release_notes_file "$release_notes"
+
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-echo-release-builder.XXXXXX")"
 trap '/bin/rm -rf -- "$fixture_root"' EXIT
+
+appcast_fixture="$fixture_root/appcast.xml"
+history_fixture="https://github.com/ohida/codex-echo/releases/tag/v$release_version-build.1"
+{
+  print -r -- '<?xml version="1.0" encoding="utf-8"?>'
+  print -r -- '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0"><channel><item>'
+  print -rn -- '<description sparkle:format="markdown"><![CDATA['
+  /bin/cat "$release_notes"
+  print -r -- ']]></description>'
+  print -r -- "<sparkle:fullReleaseNotesLink>$history_fixture</sparkle:fullReleaseNotesLink>"
+  print -r -- '</item></channel></rss>'
+} > "$appcast_fixture"
+verify_appcast_release_notes "$appcast_fixture" "$release_notes" "$history_fixture"
+
+missing_notes_fixture="$fixture_root/appcast-without-notes.xml"
+print -r -- \
+  '<?xml version="1.0"?><rss><channel><item></item></channel></rss>' \
+  > "$missing_notes_fixture"
+if (verify_appcast_release_notes \
+  "$missing_notes_fixture" "$release_notes" "$history_fixture") 2>/dev/null
+then
+  fail_test "Appcast without embedded release notes passed verification."
+fi
 
 url_fixture_commit="0123456789abcdef0123456789abcdef01234567"
 expected_url_prefix="$immutable_download_root/$url_fixture_commit/"

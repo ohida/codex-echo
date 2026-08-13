@@ -62,8 +62,10 @@ boundary before any release tag is created. That pinned workflow:
    and separately signs, notarizes, and staples the DMG in the protected Apple
    environment;
 4. signs the Sparkle appcast in a separate protected environment;
-5. creates GitHub artifact attestations for those exact three files; and
-6. retains those files as one immutable workflow artifact.
+5. embeds the tagged `release-notes/<version>.md` in the update dialog while
+   keeping the GitHub Release as the Version History destination;
+6. creates GitHub artifact attestations for those exact three files; and
+7. retains those files as one immutable workflow artifact.
 
 Repository rules reject updates or deletion of release tags. The workflow also
 re-resolves the tag before signing and attestation, and refuses a moved tag.
@@ -80,9 +82,9 @@ commit is valid for the next release start.
 The pinned workflow completes its native-signature, notarization, and appcast
 integrity checks before attesting the exact files. The release promoter accepts
 only files whose attestations bind them to the release tag and pinned workflow.
-The same verified bytes are attached to an immutable GitHub Release and
-promoted to the R2 Stable update location. No publication step rebuilds or
-re-signs them.
+The ZIP and DMG are attached to an immutable GitHub Release. The appcast remains
+an attested build output and is published only through its immutable and Stable
+R2 URLs. No publication step rebuilds or re-signs these files.
 
 To verify a downloaded release against its public source and pinned builder,
 read the source commit from the release tag and the builder commit from
