@@ -41,6 +41,60 @@ sparkle_download_url_prefix() {
   print -rn -- "$immutable_download_root/$1/"
 }
 
+validate_release_notes_file() {
+  if (( $# != 1 )); then
+    die "Usage: validate_release_notes_file <path>"
+  fi
+  local release_notes="$1"
+  if [[ ! -f "$release_notes" || ! -s "$release_notes" ]]; then
+    die "Release notes must be a nonempty regular file: $release_notes"
+  fi
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" != '- '* || "$line" == '- ' || ${#line} -gt 80 ]]; then
+      die "Release notes must contain only nonempty bullets of at most 80 characters."
+    fi
+  done < "$release_notes"
+}
+
+verify_appcast_release_notes() {
+  if (( $# != 3 )); then
+    die "Usage: verify_appcast_release_notes <appcast> <notes> <history-url>"
+  fi
+  local appcast="$1"
+  local release_notes="$2"
+  local history_url="$3"
+  local embedded_notes
+  local expected_notes
+
+  validate_release_notes_file "$release_notes"
+  if [[ "$(/usr/bin/xmllint --xpath \
+      'count((//*[local-name()="item"])[1]/*[local-name()="description"])' \
+      "$appcast")" != "1" \
+    || "$(/usr/bin/xmllint --xpath \
+      'string((//*[local-name()="item"])[1]/*[local-name()="description"]/@*[local-name()="format"])' \
+      "$appcast")" != "markdown" \
+    || "$(/usr/bin/xmllint --xpath \
+      'count((//*[local-name()="item"])[1]/*[local-name()="releaseNotesLink"])' \
+      "$appcast")" != "0" \
+    || "$(/usr/bin/xmllint --xpath \
+      'count((//*[local-name()="item"])[1]/*[local-name()="fullReleaseNotesLink"])' \
+      "$appcast")" != "1" \
+    || "$(/usr/bin/xmllint --xpath \
+      'string((//*[local-name()="item"])[1]/*[local-name()="fullReleaseNotesLink"])' \
+      "$appcast")" != "$history_url" ]]
+  then
+    die "Appcast release-note presentation metadata is invalid."
+  fi
+  embedded_notes="$(/usr/bin/xmllint --xpath \
+    'string((//*[local-name()="item"])[1]/*[local-name()="description"])' \
+    "$appcast")"
+  expected_notes="$(<"$release_notes")"
+  if [[ "$embedded_notes" != "$expected_notes" ]]; then
+    die "Appcast release notes do not match the tagged source."
+  fi
+}
+
 create_dmg() {
   if (( $# != 2 )); then
     die "Usage: create_dmg <source-folder> <output-path>"
@@ -154,6 +208,7 @@ validate_source_package() {
       die "Missing source input: $required_file"
     fi
   done
+  validate_release_notes_file "$source_root/release-notes/$RELEASE_VERSION.md"
 
   /usr/bin/plutil -lint "$source_root/Resources/Info.plist" >/dev/null
   plist_version="$(/usr/libexec/PlistBuddy \
@@ -299,6 +354,7 @@ prepare_source() {
   local icon_sha
   local license_sha
   local notices_sha
+  local release_notes_sha
 
   source_root="$(existing_directory "$1" "Source root")"
   release_identity
@@ -329,18 +385,23 @@ prepare_source() {
   /bin/cp \
     "$source_root/THIRD_PARTY_NOTICES" \
     "$payload_directory/THIRD_PARTY_NOTICES"
+  /bin/cp \
+    "$source_root/release-notes/$RELEASE_VERSION.md" \
+    "$payload_directory/release-notes.md"
   /bin/chmod 755 "$payload_directory/CodexEcho"
   /bin/chmod 644 \
     "$payload_directory/Info.plist" \
     "$payload_directory/AppIcon-1024.png" \
     "$payload_directory/LICENSE" \
-    "$payload_directory/THIRD_PARTY_NOTICES"
+    "$payload_directory/THIRD_PARTY_NOTICES" \
+    "$payload_directory/release-notes.md"
 
   executable_sha="$(sha256_file "$payload_directory/CodexEcho")"
   info_sha="$(sha256_file "$payload_directory/Info.plist")"
   icon_sha="$(sha256_file "$payload_directory/AppIcon-1024.png")"
   license_sha="$(sha256_file "$payload_directory/LICENSE")"
   notices_sha="$(sha256_file "$payload_directory/THIRD_PARTY_NOTICES")"
+  release_notes_sha="$(sha256_file "$payload_directory/release-notes.md")"
   /usr/bin/jq -n \
     --arg repository "$SOURCE_REPOSITORY" \
     --arg ref "$SOURCE_REF" \
@@ -354,6 +415,7 @@ prepare_source() {
     --arg iconSHA256 "$icon_sha" \
     --arg licenseSHA256 "$license_sha" \
     --arg noticesSHA256 "$notices_sha" \
+    --arg releaseNotesSHA256 "$release_notes_sha" \
     '{
       schemaVersion: 1,
       source: {
@@ -370,7 +432,8 @@ prepare_source() {
         "Info.plist": $infoSHA256,
         "AppIcon-1024.png": $iconSHA256,
         LICENSE: $licenseSHA256,
-        THIRD_PARTY_NOTICES: $noticesSHA256
+        THIRD_PARTY_NOTICES: $noticesSHA256,
+        "release-notes.md": $releaseNotesSHA256
       }
     }' > "$payload_directory/identity.json"
   /bin/chmod 644 "$payload_directory/identity.json"
@@ -389,8 +452,8 @@ validate_payload() {
   fi
   entry_count="$(/usr/bin/find "$payload_directory" \
     -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')"
-  if [[ "$entry_count" != "6" ]]; then
-    die "Source payload must contain exactly six files."
+  if [[ "$entry_count" != "7" ]]; then
+    die "Source payload must contain exactly seven files."
   fi
   if [[ -n "$(/usr/bin/find "$payload_directory" \
     -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]
@@ -412,7 +475,8 @@ validate_payload() {
     Info.plist \
     AppIcon-1024.png \
     LICENSE \
-    THIRD_PARTY_NOTICES
+    THIRD_PARTY_NOTICES \
+    release-notes.md
   do
     if [[ ! -s "$payload_directory/$file" ]]; then
       die "Missing payload file: $file"
@@ -423,6 +487,7 @@ validate_payload() {
       die "Payload hash mismatch: $file"
     fi
   done
+  validate_release_notes_file "$payload_directory/release-notes.md"
 
   if [[ "$(/usr/bin/jq -r '.source.tag' "$identity")" != "$expected_tag" \
     || "$(/usr/bin/jq -r '.version' "$identity")" != "$expected_version" \
@@ -613,6 +678,7 @@ apple_finalize() {
   local dmg_root
   local app_cdhash
   local team_identifier
+  local release_notes_sha
 
   payload_directory="$(existing_directory "$1" "Source payload")"
   require_value CODE_SIGN_IDENTITY
@@ -760,6 +826,11 @@ apple_finalize() {
     --verbose=4 \
     "$final_dmg"
 
+  /bin/cp "$payload_directory/release-notes.md" \
+    "$output_directory/release-notes.md"
+  /bin/chmod 644 "$output_directory/release-notes.md"
+  release_notes_sha="$(sha256_file "$output_directory/release-notes.md")"
+
   app_cdhash="$(/usr/bin/codesign --display --verbose=4 "$app" 2>&1 \
     | /usr/bin/sed -n 's/^CDHash=//p' \
     | /usr/bin/head -n 1)"
@@ -780,6 +851,7 @@ apple_finalize() {
     --arg dmgSHA256 "$(sha256_file "$final_dmg")" \
     --arg appCDHash "$app_cdhash" \
     --arg teamIdentifier "$team_identifier" \
+    --arg releaseNotesSHA256 "$release_notes_sha" \
     '{
       schemaVersion: 1,
       source: {
@@ -794,6 +866,10 @@ apple_finalize() {
       artifacts: {
         zip: {name: $zip, sha256: $zipSHA256},
         dmg: {name: $dmg, sha256: $dmgSHA256}
+      },
+      releaseNotes: {
+        name: "release-notes.md",
+        sha256: $releaseNotesSHA256
       },
       signing: {
         appCDHash: $appCDHash,
@@ -826,6 +902,10 @@ sparkle_finalize() {
   local archive_length
   local download_url_prefix
   local expected_enclosure_url
+  local release_notes_path
+  local release_notes_name
+  local history_url
+  local apple_entry_count
 
   apple_directory="$(existing_directory "$1" "Apple artifact directory")"
   identity="$apple_directory/apple-identity.json"
@@ -835,6 +915,14 @@ sparkle_finalize() {
   release_identity
   if [[ ! -s "$identity" ]]; then
     die "Missing apple-identity.json."
+  fi
+  apple_entry_count="$(/usr/bin/find "$apple_directory" \
+    -mindepth 1 -maxdepth 1 -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')"
+  if [[ "$apple_entry_count" != "4" \
+    || -n "$(/usr/bin/find "$apple_directory" \
+      -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]
+  then
+    die "Apple artifact payload must contain exactly four regular files."
   fi
   if [[ "$(/usr/bin/jq -r '.source.repository' "$identity")" != "$SOURCE_REPOSITORY" \
     || "$(/usr/bin/jq -r '.source.ref' "$identity")" != "$SOURCE_REF" \
@@ -849,6 +937,16 @@ sparkle_finalize() {
   then
     die "Apple artifacts do not match the workflow identity."
   fi
+  release_notes_name="$(/usr/bin/jq -r '.releaseNotes.name // empty' "$identity")"
+  release_notes_path="$apple_directory/$release_notes_name"
+  if [[ "$release_notes_name" != "release-notes.md" \
+    || ! -f "$release_notes_path" \
+    || "$(sha256_file "$release_notes_path")" \
+      != "$(/usr/bin/jq -r '.releaseNotes.sha256 // empty' "$identity")" ]]
+  then
+    die "Release notes do not match the signed Apple artifact identity."
+  fi
+  validate_release_notes_file "$release_notes_path"
   zip_name="$(/usr/bin/jq -r '.artifacts.zip.name' "$identity")"
   dmg_name="$(/usr/bin/jq -r '.artifacts.dmg.name' "$identity")"
   if [[ "$zip_name" != "Codex-Echo-$RELEASE_VERSION-build.$RELEASE_BUILD.zip" \
@@ -880,12 +978,16 @@ sparkle_finalize() {
   appcast_root="$staging_root/appcast"
   /bin/mkdir -p "$appcast_root"
   /bin/cp "$zip_path" "$appcast_root/$zip_name"
+  /bin/cp "$release_notes_path" \
+    "$appcast_root/${zip_name%.zip}.md"
   download_url_prefix="$(sparkle_download_url_prefix "$SOURCE_COMMIT")"
+  history_url="$official_repository_url/releases/tag/$RELEASE_TAG"
   print -rn -- "$sparkle_private_key" \
     | "$generate_appcast" \
       --ed-key-file - \
       --download-url-prefix "$download_url_prefix" \
-      --full-release-notes-url "$official_repository_url/releases/tag/$RELEASE_TAG" \
+      --embed-release-notes \
+      --full-release-notes-url "$history_url" \
       --link "$official_repository_url" \
       --maximum-deltas 0 \
       --maximum-versions 1 \
@@ -897,6 +999,7 @@ sparkle_finalize() {
   if [[ "$(/usr/bin/xmllint --xpath 'count(/rss/channel/item)' "$appcast_path")" != "1" ]]; then
     die "Appcast must contain exactly one item."
   fi
+  verify_appcast_release_notes "$appcast_path" "$release_notes_path" "$history_url"
   enclosure_url="$(/usr/bin/xmllint --xpath \
     'string((//*[local-name()="enclosure"])[1]/@url)' \
     "$appcast_path")"
