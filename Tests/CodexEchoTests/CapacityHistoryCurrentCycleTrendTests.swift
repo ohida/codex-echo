@@ -75,13 +75,46 @@ final class CapacityHistoryCurrentCycleTrendTests: XCTestCase {
       CapacityHistoryCurrentCycleTrendPolicy.trend(
         [CapacityHistorySegment(observations: observations)],
         rangeStart: start,
-        rangeEnd: reset
+        rangeEnd: reset,
+        activeResetsAt: reset
       )
     )
 
     XCTAssertEqual(trend.knots.count, 5)
     XCTAssertEqual(trend.knots[1].remainingPercent, 99, accuracy: 0.000_001)
     XCTAssertEqual(trend.knots.last?.remainingPercent, 72)
+  }
+
+  func testAuthoritativeResetExcludesOldCycleWhenOnlySummaryEndpointIsCurrent()
+    throws
+  {
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+    let oldCycle = CapacityObservation(
+      observedAt: start.addingTimeInterval(120),
+      remainingPercent: 8,
+      sessionID: UUID(),
+      resetsAt: reset.addingTimeInterval(-7 * 24 * 60 * 60)
+    )
+    let summaryEndpoint = CapacityHistoryCurrentCycleEndpoint(
+      observedAt: start.addingTimeInterval(90),
+      remainingPercent: 97
+    )
+
+    let trend = try XCTUnwrap(
+      CapacityHistoryCurrentCycleTrendPolicy.trend(
+        [CapacityHistorySegment(observations: [oldCycle])],
+        rangeStart: start,
+        rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: summaryEndpoint
+      )
+    )
+
+    XCTAssertEqual(trend.knots.first?.remainingPercent, 100)
+    XCTAssertEqual(trend.knots.last?.observedAt, summaryEndpoint.observedAt)
+    XCTAssertEqual(trend.knots.last?.remainingPercent, 97)
+    XCTAssertTrue(trend.knots.allSatisfy { $0.remainingPercent >= 97 })
   }
 
   func testCurrentCycleTrendAbsorbsAnObservedIncreaseWithoutTurningUp() throws {
@@ -148,12 +181,121 @@ final class CapacityHistoryCurrentCycleTrendTests: XCTestCase {
         [CapacityHistorySegment(observations: [latest])],
         rangeStart: start,
         rangeEnd: reset,
-        liveTail: liveTail
+        activeResetsAt: reset,
+        liveTail: liveTail,
+        summaryEndpoint: CapacityHistoryCurrentCycleEndpoint(
+          observedAt: now.addingTimeInterval(30),
+          remainingPercent: 50
+        )
       )
     )
 
     XCTAssertEqual(trend.knots.last?.observedAt, now)
     XCTAssertEqual(trend.knots.last?.remainingPercent, 97)
+  }
+
+  func testSummaryEndpointIsUsedOnlyWhenNewerThanMatchingStoredLatest()
+    throws
+  {
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+    let latestDate = start.addingTimeInterval(60)
+    let latest = CapacityObservation(
+      observedAt: latestDate,
+      remainingPercent: 96,
+      sessionID: UUID(),
+      resetsAt: reset
+    )
+    let segment = CapacityHistorySegment(observations: [latest])
+
+    let newer = try XCTUnwrap(
+      CapacityHistoryCurrentCycleTrendPolicy.trend(
+        [segment],
+        rangeStart: start,
+        rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: CapacityHistoryCurrentCycleEndpoint(
+          observedAt: latestDate.addingTimeInterval(30),
+          remainingPercent: 94
+        )
+      )
+    )
+    XCTAssertEqual(
+      newer.knots.last?.observedAt,
+      latestDate.addingTimeInterval(30)
+    )
+    XCTAssertEqual(newer.knots.last?.remainingPercent, 94)
+
+    let same = try XCTUnwrap(
+      CapacityHistoryCurrentCycleTrendPolicy.trend(
+        [segment],
+        rangeStart: start,
+        rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: CapacityHistoryCurrentCycleEndpoint(
+          observedAt: latestDate,
+          remainingPercent: 40
+        )
+      )
+    )
+    XCTAssertEqual(same.knots.last?.observedAt, latestDate)
+    XCTAssertEqual(same.knots.last?.remainingPercent, 96)
+
+    let older = try XCTUnwrap(
+      CapacityHistoryCurrentCycleTrendPolicy.trend(
+        [segment],
+        rangeStart: start,
+        rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: CapacityHistoryCurrentCycleEndpoint(
+          observedAt: latestDate.addingTimeInterval(-30),
+          remainingPercent: 20
+        )
+      )
+    )
+    XCTAssertEqual(older.knots.last?.observedAt, latestDate)
+    XCTAssertEqual(older.knots.last?.remainingPercent, 96)
+  }
+
+  func testSummaryEndpointStopsAtItsOriginalObservationTime() throws {
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+    let summaryEndpoint = CapacityHistoryCurrentCycleEndpoint(
+      observedAt: start.addingTimeInterval(2 * 60 * 60),
+      remainingPercent: 91
+    )
+    let series = try XCTUnwrap(
+      CapacityHistoryCurrentCycleRenderPolicy.series(
+        [],
+        rangeStart: start,
+        rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: summaryEndpoint,
+        plotWidth: 600
+      )
+    )
+
+    XCTAssertEqual(series.trend.knots.last?.observedAt, summaryEndpoint.observedAt)
+    XCTAssertEqual(series.samples.last?.observedAt, summaryEndpoint.observedAt)
+    XCTAssertLessThan(summaryEndpoint.observedAt, reset)
+  }
+
+  func testSummaryEndpointOutsideCurrentCycleDoesNotProduceTrend() {
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = start.addingTimeInterval(7 * 24 * 60 * 60)
+
+    XCTAssertNil(
+      CapacityHistoryCurrentCycleTrendPolicy.trend(
+        [],
+        rangeStart: start,
+        rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: CapacityHistoryCurrentCycleEndpoint(
+          observedAt: reset.addingTimeInterval(1),
+          remainingPercent: 80
+        )
+      )
+    )
   }
 
   func testCurrentCycleTrendHasFiniteBoundedTangentsAndNoOvershoot() throws {
@@ -335,12 +477,18 @@ final class CapacityHistoryCurrentCycleTrendTests: XCTestCase {
       )
     }
     let segment = CapacityHistorySegment(observations: observations)
+    let summaryEndpoint = CapacityHistoryCurrentCycleEndpoint(
+      observedAt: start.addingTimeInterval(10 * 60 * 60),
+      remainingPercent: 95
+    )
 
     let compact = try XCTUnwrap(
       CapacityHistoryCurrentCycleRenderPolicy.series(
         [segment],
         rangeStart: start,
         rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: summaryEndpoint,
         plotWidth: 600
       )
     )
@@ -349,11 +497,15 @@ final class CapacityHistoryCurrentCycleTrendTests: XCTestCase {
         [segment],
         rangeStart: start,
         rangeEnd: reset,
+        activeResetsAt: reset,
+        summaryEndpoint: summaryEndpoint,
         plotWidth: 1_400
       )
     )
 
     XCTAssertEqual(compact.trend, spacious.trend)
+    XCTAssertEqual(compact.samples.last?.observedAt, summaryEndpoint.observedAt)
+    XCTAssertEqual(compact.samples.last?.remainingPercent, 95)
     XCTAssertNotEqual(compact.samples.count, spacious.samples.count)
     XCTAssertEqual(compact.lineSamples, compact.bandSamples)
     XCTAssertEqual(spacious.lineSamples, spacious.bandSamples)

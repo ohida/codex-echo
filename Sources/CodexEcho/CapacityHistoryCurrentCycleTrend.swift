@@ -174,7 +174,9 @@ enum CapacityHistoryCurrentCycleTrendPolicy {
     _ segments: [CapacityHistorySegment],
     rangeStart: Date,
     rangeEnd: Date,
-    liveTail: CapacityHistoryLiveTail? = nil
+    activeResetsAt: Date? = nil,
+    liveTail: CapacityHistoryLiveTail? = nil,
+    summaryEndpoint: CapacityHistoryCurrentCycleEndpoint? = nil
   ) -> CapacityHistoryCurrentCycleTrend? {
     var observations = segments
       .flatMap(\.observations)
@@ -182,6 +184,15 @@ enum CapacityHistoryCurrentCycleTrendPolicy {
         $0.observedAt >= rangeStart && $0.observedAt <= rangeEnd
       }
       .sorted { $0.observedAt < $1.observedAt }
+
+    if let activeResetsAt {
+      observations = observations.filter {
+        CapacityHistoryResetBoundary.matches(
+          $0.resetsAt,
+          activeResetsAt
+        )
+      }
+    }
 
     let endpointDate: Date
     let endpointRemainingPercent: Double
@@ -192,6 +203,16 @@ enum CapacityHistoryCurrentCycleTrendPolicy {
     {
       endpointDate = liveTail.endsAt
       endpointRemainingPercent = Double(liveTail.remainingPercent)
+    } else if
+      let summaryEndpoint,
+      summaryEndpoint.observedAt >= rangeStart,
+      summaryEndpoint.observedAt <= rangeEnd,
+      observations.last.map({
+        summaryEndpoint.observedAt > $0.observedAt
+      }) ?? true
+    {
+      endpointDate = summaryEndpoint.observedAt
+      endpointRemainingPercent = Double(summaryEndpoint.remainingPercent)
     } else if let latest = observations.last {
       endpointDate = latest.observedAt
       endpointRemainingPercent = Double(latest.remainingPercent)
@@ -200,9 +221,12 @@ enum CapacityHistoryCurrentCycleTrendPolicy {
     }
     guard endpointDate > rangeStart else { return nil }
 
-    if let activeObservation = observations.last(where: {
-      $0.observedAt <= endpointDate
-    }) {
+    if
+      activeResetsAt == nil,
+      let activeObservation = observations.last(where: {
+        $0.observedAt <= endpointDate
+      })
+    {
       observations = observations.filter {
         CapacityHistoryResetBoundary.matches(
           $0.resetsAt,
@@ -432,7 +456,9 @@ enum CapacityHistoryCurrentCycleRenderPolicy {
     _ segments: [CapacityHistorySegment],
     rangeStart: Date,
     rangeEnd: Date,
+    activeResetsAt: Date? = nil,
     liveTail: CapacityHistoryLiveTail? = nil,
+    summaryEndpoint: CapacityHistoryCurrentCycleEndpoint? = nil,
     plotWidth: CGFloat
   ) -> CapacityHistoryCurrentCycleRenderSeries? {
     guard
@@ -440,7 +466,9 @@ enum CapacityHistoryCurrentCycleRenderPolicy {
         segments,
         rangeStart: rangeStart,
         rangeEnd: rangeEnd,
-        liveTail: liveTail
+        activeResetsAt: activeResetsAt,
+        liveTail: liveTail,
+        summaryEndpoint: summaryEndpoint
       )
     else { return nil }
 

@@ -521,6 +521,26 @@ struct CapacityHistoryLoadGeneration {
 }
 
 enum CapacityHistorySelectionPolicy {
+  static func availableDates(
+    projection: CapacityHistoryProjection,
+    liveTail: CapacityHistoryLiveTail?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
+    trendLines: [CapacityHistoryTrendLine]
+  ) -> [Date] {
+    var dates = projection.observationsInRange.map(\.observedAt)
+    if let liveTail {
+      dates.append(liveTail.endsAt)
+    }
+    if let currentCycleEndpoint {
+      dates.append(currentCycleEndpoint.endpoint.observedAt)
+    }
+    for trendLine in trendLines {
+      dates.append(trendLine.startsAt)
+      dates.append(trendLine.endsAt)
+    }
+    return dates
+  }
+
   static func movedDate(
     from selectedDate: Date?,
     direction: Int,
@@ -535,6 +555,58 @@ enum CapacityHistorySelectionPolicy {
       return dates.last(where: { $0 < selectedDate }) ?? dates.first
     }
     return dates.first(where: { $0 > selectedDate }) ?? dates.last
+  }
+}
+
+enum CapacityHistoryCurrentCycleInspectionEndpoint: Equatable {
+  case current(CapacityHistoryCurrentCycleEndpoint)
+  case lastReceived(CapacityHistoryCurrentCycleEndpoint)
+
+  static func resolve(
+    current: CapacityHistoryCurrentCycleEndpoint?,
+    lastReceived: CapacityHistoryCurrentCycleEndpoint?
+  ) -> Self? {
+    if let current {
+      return .current(current)
+    }
+    if let lastReceived {
+      return .lastReceived(lastReceived)
+    }
+    return nil
+  }
+
+  var endpoint: CapacityHistoryCurrentCycleEndpoint {
+    switch self {
+    case .current(let endpoint), .lastReceived(let endpoint):
+      endpoint
+    }
+  }
+
+  var inspectionDescription: String {
+    switch self {
+    case .current(let endpoint):
+      "Current Capacity \(endpoint.remainingPercent)%"
+    case .lastReceived(let endpoint):
+      "Last received Capacity \(endpoint.remainingPercent)%"
+    }
+  }
+
+  var accessibilitySeriesName: String {
+    switch self {
+    case .current:
+      "Current Capacity"
+    case .lastReceived:
+      "Last received Capacity"
+    }
+  }
+
+  var accessibilityQualifier: String {
+    switch self {
+    case .current:
+      "current"
+    case .lastReceived:
+      "last received"
+    }
   }
 }
 
@@ -599,6 +671,7 @@ enum CapacityHistoryInspectionCopy {
     at selectedDate: Date,
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint? = nil,
     trendLines: [CapacityHistoryTrendLine] = [],
     calendar: Calendar = .autoupdatingCurrent
   ) -> String {
@@ -608,7 +681,15 @@ enum CapacityHistoryInspectionCopy {
         calendar: calendar
       ),
     ]
-    if let remainingPercent = projection.remainingPercent(
+    if
+      let currentCycleEndpoint,
+      abs(
+        currentCycleEndpoint.endpoint.observedAt
+          .timeIntervalSince(selectedDate)
+      ) < 0.5
+    {
+      parts.append(currentCycleEndpoint.inspectionDescription)
+    } else if let remainingPercent = projection.remainingPercent(
       at: selectedDate,
       liveTail: liveTail
     ) {
@@ -632,6 +713,7 @@ struct CapacityHistoryChartAccessibilityDescriptor:
 {
   let projection: CapacityHistoryProjection
   let liveTail: CapacityHistoryLiveTail?
+  var currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint? = nil
   var trendLines: [CapacityHistoryTrendLine] = []
   var calendar: Calendar = .autoupdatingCurrent
 
@@ -719,6 +801,31 @@ struct CapacityHistoryChartAccessibilityDescriptor:
         )
       }
     }
+    if let currentCycleEndpoint {
+      let endpoint = currentCycleEndpoint.endpoint
+      series.append(
+        AXDataSeriesDescriptor(
+          name: currentCycleEndpoint.accessibilitySeriesName,
+          isContinuous: false,
+          dataPoints: [
+            AXDataPoint(
+              x: endpoint.observedAt
+                .timeIntervalSinceReferenceDate,
+              y: Double(endpoint.remainingPercent),
+              additionalValues: [],
+              label: [
+                CapacityHistoryDateTimeCopy.abbreviated(
+                  endpoint.observedAt,
+                  calendar: calendar
+                ),
+                "\(endpoint.remainingPercent) percent remaining",
+                currentCycleEndpoint.accessibilityQualifier,
+              ].joined(separator: ", ")
+            ),
+          ]
+        )
+      )
+    }
     for trendLine in trendLines {
       series.append(
         AXDataSeriesDescriptor(
@@ -762,6 +869,61 @@ struct CapacityHistoryChartAccessibilityDescriptor:
     descriptor.series = updated.series
   }
 
+}
+
+enum CapacityHistoryCurrentCycleDataPolicy {
+  static func observations(
+    _ observations: [CapacityObservation],
+    matching context: CapacityHistoryCurrentCycleContext
+  ) -> [CapacityObservation] {
+    let viewport = context.viewport
+    return observations.filter {
+      $0.windowDurationMinutes == context.windowDurationMinutes
+        && $0.observedAt >= viewport.rangeStart
+        && $0.observedAt <= viewport.rangeEnd
+        && CapacityHistoryResetBoundary.matches(
+          $0.resetsAt,
+          context.resetsAt
+        )
+    }
+  }
+
+  static func retainedEndpoint(
+    presentation: CapacityHistoryCurrentCyclePresentation,
+    matchingObservations: [CapacityObservation]
+  ) -> CapacityHistoryCurrentCycleEndpoint? {
+    guard case .retained(let context) = presentation else { return nil }
+    guard isNewerThanStoredHistory(
+      context.endpoint,
+      observations: matchingObservations
+    ) else { return nil }
+    return context.endpoint
+  }
+
+  static func activeSummaryEndpoint(
+    presentation: CapacityHistoryCurrentCyclePresentation,
+    hasLiveTail: Bool,
+    matchingObservations: [CapacityObservation]
+  ) -> CapacityHistoryCurrentCycleEndpoint? {
+    guard
+      !hasLiveTail,
+      case .active(let context) = presentation,
+      isNewerThanStoredHistory(
+        context.endpoint,
+        observations: matchingObservations
+      )
+    else { return nil }
+    return context.endpoint
+  }
+
+  private static func isNewerThanStoredHistory(
+    _ endpoint: CapacityHistoryCurrentCycleEndpoint,
+    observations: [CapacityObservation]
+  ) -> Bool {
+    guard let latestObservedAt = observations.lazy.map(\.observedAt).max()
+    else { return true }
+    return endpoint.observedAt > latestObservedAt
+  }
 }
 
 struct CapacityHistoryChartPlotInsets: Equatable {
@@ -978,7 +1140,6 @@ final class CapacityHistoryViewModel: ObservableObject {
   private var loadGeneration = CapacityHistoryLoadGeneration()
   private var hasInitializedLimitSelection = false
   private var hasLoadedHistory = false
-  private var hasSeenValidCurrentWindow = false
   private var persistedLimitDurationMinutes: Int?
 
   init(
@@ -1009,10 +1170,14 @@ final class CapacityHistoryViewModel: ObservableObject {
     hasStoredHistory && !isLoading && !isMutatingHistory
   }
 
-  func availableLimits(snapshot: CodexUsageSnapshot?) -> [CapacityHistoryLimit] {
+  func availableLimits(
+    snapshot: CodexUsageSnapshot?,
+    retainedLimits: [CapacityHistoryLimit] = []
+  ) -> [CapacityHistoryLimit] {
     var durations = Set(
       snapshot?.windows.compactMap(\.windowDurationMinutes) ?? []
     )
+    durations.formUnion(retainedLimits.map(\.windowDurationMinutes))
     for observation in observations {
       durations.insert(observation.windowDurationMinutes)
     }
@@ -1024,9 +1189,12 @@ final class CapacityHistoryViewModel: ObservableObject {
 
   func reconcileLimitSelection(
     snapshot: CodexUsageSnapshot?,
-    usageAvailability: CodexUsageAvailability = .pending
+    retainedLimits: [CapacityHistoryLimit] = []
   ) {
-    let available = availableLimits(snapshot: snapshot)
+    let available = availableLimits(
+      snapshot: snapshot,
+      retainedLimits: retainedLimits
+    )
     if !available.isEmpty {
       let fallback = snapshot?.constrainingWindow?.windowDurationMinutes
         .flatMap { duration in
@@ -1055,32 +1223,12 @@ final class CapacityHistoryViewModel: ObservableObject {
       }
     }
 
-    let currentWindow = snapshot?.window(
-      durationMinutes: selectedLimit.windowDurationMinutes
-    )
-    let hasValidCurrentWindow = CapacityHistoryViewport.make(
-      selection: .currentWindow,
-      window: currentWindow,
-      now: .now
-    ) != nil
-    if hasValidCurrentWindow {
-      hasSeenValidCurrentWindow = true
-    } else if
-      selectedRange == .currentWindow
-        && (
-          snapshot != nil
-            || hasSeenValidCurrentWindow
-            || usageAvailability == .unavailable
-        )
-    {
-      selectedRange = .twentyFourHours
-    }
   }
 
   func selectLimit(
     _ limit: CapacityHistoryLimit,
     snapshot: CodexUsageSnapshot?,
-    usageAvailability: CodexUsageAvailability = .pending
+    retainedLimits: [CapacityHistoryLimit] = []
   ) {
     selectedLimit = limit
     selectedDate = nil
@@ -1092,7 +1240,7 @@ final class CapacityHistoryViewModel: ObservableObject {
     )
     reconcileLimitSelection(
       snapshot: snapshot,
-      usageAvailability: usageAvailability
+      retainedLimits: retainedLimits
     )
   }
 
@@ -1120,14 +1268,14 @@ final class CapacityHistoryViewModel: ObservableObject {
   func refreshAndReconcile(
     currentState: () -> (
       snapshot: CodexUsageSnapshot?,
-      usageAvailability: CodexUsageAvailability
+      retainedLimits: [CapacityHistoryLimit]
     )
   ) async {
     await refresh()
     let currentState = currentState()
     reconcileLimitSelection(
       snapshot: currentState.snapshot,
-      usageAvailability: currentState.usageAvailability
+      retainedLimits: currentState.retainedLimits
     )
   }
 
@@ -1235,49 +1383,102 @@ struct CapacityHistoryView: View {
   var body: some View {
     TimelineView(.periodic(from: .now, by: 30)) { _ in
       let now = Date.now
-      let selectedWindow = model.codexUsageSnapshot?.window(
-        durationMinutes: viewModel.selectedLimit.windowDurationMinutes
-      )
-      let viewport = CapacityHistoryViewport.make(
-        selection: viewModel.selectedRange,
-        window: selectedWindow,
-        now: now
-      ) ?? CapacityHistoryViewport.make(
-        selection: .twentyFourHours,
-        window: nil,
-        now: now
-      )!
-      let selectedObservations = viewModel.selectedObservations
-      let projection = CapacityHistoryProjection(
-        observations: selectedObservations,
-        period: viewport.axisStyle.projectionPeriod,
-        viewport: viewport,
-        observedThrough: now
-      )
+      let retainedLimits = recorder.retainedCurrentCycleLimits(now: now)
       let liveValue = recorder.liveValue(for: viewModel.selectedLimit)
+      let receivedLiveValue = recorder.receivedLiveValue(
+        for: viewModel.selectedLimit
+      )
+      let currentCyclePresentation =
+        CapacityHistoryCurrentCyclePresentation.resolve(
+          limit: viewModel.selectedLimit,
+          receivedLiveValue: receivedLiveValue,
+          context: recorder.currentCycleContext(
+            for: viewModel.selectedLimit,
+            now: now
+          ),
+          snapshot: model.codexUsageSnapshot,
+          isConnected: recorder.isConnected,
+          now: now
+        )
+      let hasActiveCurrentCycle = currentCyclePresentation.activeContext != nil
+      let presentedLiveValue = viewModel.selectedRange == .currentWindow
+        ? (hasActiveCurrentCycle ? receivedLiveValue : nil)
+        : liveValue
+      let viewport = viewModel.selectedRange == .currentWindow
+        ? currentCyclePresentation.viewport
+        : CapacityHistoryViewport.make(
+          selection: viewModel.selectedRange,
+          window: nil,
+          now: now
+        )
+      let selectedObservations = viewModel.selectedObservations
+      let presentedObservations = currentCyclePresentation.context.map {
+        CapacityHistoryCurrentCycleDataPolicy.observations(
+          selectedObservations,
+          matching: $0
+        )
+      } ?? []
+      let chartObservations = viewModel.selectedRange == .currentWindow
+        ? presentedObservations
+        : selectedObservations
+      let projection = viewport.map {
+        CapacityHistoryProjection(
+          observations: chartObservations,
+          period: $0.axisStyle.projectionPeriod,
+          viewport: $0,
+          observedThrough: now
+        )
+      }
       let monitoringState = CapacityHistoryMonitoringState.resolve(
         isRecordingEnabled: recorder.isRecordingEnabled,
         isConnected: recorder.isConnected,
-        liveObservedAt: liveValue?.observedAt,
-        latestStoredObservedAt: selectedObservations.last?.observedAt,
+        liveObservedAt: presentedLiveValue?.observedAt,
+        latestStoredObservedAt: chartObservations.last?.observedAt,
         now: now
       )
-      let liveTail = CapacityHistoryLiveTail(
-        latestObservation: projection.latestObservation,
-        liveRemainingPercent: liveValue?.remainingPercent,
-        liveSessionID: liveValue?.sessionID,
-        monitoringState: monitoringState,
-        now: min(now, viewport.rangeEnd)
-      )
+      let canUseFreshLiveTail =
+        viewModel.selectedRange != .currentWindow || hasActiveCurrentCycle
+      let liveTail: CapacityHistoryLiveTail? = projection.flatMap { projection in
+        guard canUseFreshLiveTail, let viewport else { return nil }
+        return CapacityHistoryLiveTail(
+          latestObservation: projection.latestObservation,
+          liveRemainingPercent: presentedLiveValue?.remainingPercent,
+          liveSessionID: presentedLiveValue?.sessionID,
+          monitoringState: monitoringState,
+          now: min(now, viewport.rangeEnd)
+        )
+      }
+      let lastReceivedEndpoint = viewModel.selectedRange == .currentWindow
+        ? CapacityHistoryCurrentCycleDataPolicy.retainedEndpoint(
+          presentation: currentCyclePresentation,
+          matchingObservations: presentedObservations
+        )
+        : nil
+      let activeSummaryEndpoint = viewModel.selectedRange == .currentWindow
+        ? CapacityHistoryCurrentCycleDataPolicy.activeSummaryEndpoint(
+          presentation: currentCyclePresentation,
+          hasLiveTail: liveTail != nil,
+          matchingObservations: presentedObservations
+        )
+        : nil
+      let summaryEndpoint = lastReceivedEndpoint ?? activeSummaryEndpoint
+      let inspectionEndpoint =
+        CapacityHistoryCurrentCycleInspectionEndpoint.resolve(
+          current: activeSummaryEndpoint,
+          lastReceived: lastReceivedEndpoint
+        )
       let trendLines = viewModel.selectedRange == .currentWindow
         ? currentCycleTrendLines(
-          liveValue: liveValue,
-          window: selectedWindow,
+          presentation: currentCyclePresentation,
           now: now
         )
         : []
+      let overviewSnapshot =
+        viewModel.selectedRange != .currentWindow || hasActiveCurrentCycle
+        ? model.codexUsageSnapshot
+        : nil
       let capacityOverview = CodexCapacityOverviewPresentation.make(
-        snapshot: model.codexUsageSnapshot,
+        snapshot: overviewSnapshot,
         windowDurationMinutes: viewModel.selectedLimit.windowDurationMinutes
       )
 
@@ -1288,34 +1489,37 @@ struct CapacityHistoryView: View {
         capacityOverviewView(
           presentation: capacityOverview,
           availableLimits: viewModel.availableLimits(
-            snapshot: model.codexUsageSnapshot
+            snapshot: model.codexUsageSnapshot,
+            retainedLimits: retainedLimits
           ),
-          selectedObservations: selectedObservations,
-          liveValue: liveValue
+          selectedObservations: chartObservations,
+          liveValue: presentedLiveValue,
+          lastReceivedEndpoint: lastReceivedEndpoint
         )
         Divider()
-        historyRangeControl(
-          canShowCurrentWindow: selectedWindow.flatMap {
-            CapacityHistoryViewport.make(
-              selection: .currentWindow,
-              window: $0,
-              now: now
-            )
-          } != nil
-        )
+        historyRangeControl()
         if !monitoringState.isRecording {
           historyMonitoringStatus(
             monitoringState: monitoringState,
             now: now
           )
         }
-        chartContent(
-          projection: projection,
-          liveTail: liveTail,
-          trendLines: trendLines,
-          selectedObservations: selectedObservations,
-          now: now
-        )
+        if let projection {
+          chartContent(
+            projection: projection,
+            liveTail: liveTail,
+            summaryEndpoint: summaryEndpoint,
+            currentCycleEndpoint: inspectionEndpoint,
+            activeResetsAt: viewModel.selectedRange == .currentWindow
+              ? currentCyclePresentation.resetsAt
+              : nil,
+            trendLines: trendLines,
+            selectedObservations: chartObservations,
+            now: now
+          )
+        } else if case .unavailable(let reason) = currentCyclePresentation {
+          currentCycleUnavailableContent(reason: reason)
+        }
       }
       .padding(.horizontal, 24)
       .padding(
@@ -1330,7 +1534,7 @@ struct CapacityHistoryView: View {
     .onAppear {
       viewModel.reconcileLimitSelection(
         snapshot: model.codexUsageSnapshot,
-        usageAvailability: model.codexUsageAvailability
+        retainedLimits: recorder.retainedCurrentCycleLimits(now: .now)
       )
       #if DEBUG
         if ProcessInfo.processInfo.environment[
@@ -1349,7 +1553,7 @@ struct CapacityHistoryView: View {
       await viewModel.refreshAndReconcile {
         (
           snapshot: model.codexUsageSnapshot,
-          usageAvailability: model.codexUsageAvailability
+          retainedLimits: recorder.retainedCurrentCycleLimits(now: .now)
         )
       }
     }
@@ -1358,7 +1562,7 @@ struct CapacityHistoryView: View {
         await viewModel.refreshAndReconcile {
           (
             snapshot: model.codexUsageSnapshot,
-            usageAvailability: model.codexUsageAvailability
+            retainedLimits: recorder.retainedCurrentCycleLimits(now: .now)
           )
         }
       }
@@ -1366,14 +1570,14 @@ struct CapacityHistoryView: View {
     .onReceive(model.$codexUsageSnapshot.dropFirst()) { snapshot in
       viewModel.reconcileLimitSelection(
         snapshot: snapshot,
-        usageAvailability: model.codexUsageAvailability
+        retainedLimits: recorder.retainedCurrentCycleLimits(now: .now)
       )
       viewModel.selectedDate = nil
     }
-    .onReceive(model.$codexUsageAvailability.dropFirst()) { availability in
+    .onReceive(model.$codexUsageAvailability.dropFirst()) { _ in
       viewModel.reconcileLimitSelection(
         snapshot: model.codexUsageSnapshot,
-        usageAvailability: availability
+        retainedLimits: recorder.retainedCurrentCycleLimits(now: .now)
       )
       viewModel.selectedDate = nil
     }
@@ -1410,7 +1614,7 @@ struct CapacityHistoryView: View {
             viewModel.selectLimit(
               limit,
               snapshot: model.codexUsageSnapshot,
-              usageAvailability: model.codexUsageAvailability
+              retainedLimits: recorder.retainedCurrentCycleLimits(now: .now)
             )
           }
         )
@@ -1431,14 +1635,11 @@ struct CapacityHistoryView: View {
     }
   }
 
-  private func historyRangeControl(
-    canShowCurrentWindow: Bool
-  ) -> some View {
+  private func historyRangeControl() -> some View {
     Picker("Time Range", selection: $viewModel.selectedRange) {
       ForEach(CapacityHistoryRangeSelection.allCases) { range in
         Text(range.title)
           .tag(range)
-          .disabled(range == .currentWindow && !canShowCurrentWindow)
       }
     }
     .labelsHidden()
@@ -1456,7 +1657,8 @@ struct CapacityHistoryView: View {
     presentation: CodexCapacityOverviewPresentation,
     availableLimits: [CapacityHistoryLimit],
     selectedObservations: [CapacityObservation],
-    liveValue: CapacityHistoryLiveValue?
+    liveValue: CapacityHistoryLiveValue?,
+    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint?
   ) -> some View {
     HStack(alignment: .lastTextBaseline, spacing: 24) {
       VStack(
@@ -1467,7 +1669,8 @@ struct CapacityHistoryView: View {
         capacityRemainingView(
           presentation: presentation,
           selectedObservations: selectedObservations,
-          liveValue: liveValue
+          liveValue: liveValue,
+          lastReceivedEndpoint: lastReceivedEndpoint
         )
       }
 
@@ -1489,7 +1692,8 @@ struct CapacityHistoryView: View {
   private func capacityRemainingView(
     presentation: CodexCapacityOverviewPresentation,
     selectedObservations: [CapacityObservation],
-    liveValue: CapacityHistoryLiveValue?
+    liveValue: CapacityHistoryLiveValue?,
+    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint?
   ) -> some View {
     if let remainingPercent = presentation.remainingPercent {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1497,6 +1701,15 @@ struct CapacityHistoryView: View {
           .font(.system(size: 34, weight: .semibold, design: .rounded))
           .contentTransition(.numericText())
         Text("remaining")
+          .font(.headline)
+          .foregroundStyle(.secondary)
+      }
+      .accessibilityElement(children: .combine)
+    } else if let lastReceivedEndpoint {
+      HStack(alignment: .firstTextBaseline, spacing: 6) {
+        Text("\(lastReceivedEndpoint.remainingPercent)%")
+          .font(.system(size: 30, weight: .semibold, design: .rounded))
+        Text("last received")
           .font(.headline)
           .foregroundStyle(.secondary)
       }
@@ -1578,10 +1791,43 @@ struct CapacityHistoryView: View {
     .accessibilityElement(children: .combine)
   }
 
+  private func currentCycleUnavailableContent(
+    reason: CapacityHistoryCurrentCycleUnavailableReason
+  ) -> some View {
+    let description = switch reason {
+    case .awaiting:
+      "Waiting for current cycle information from Codex."
+    case .unavailableForLimit:
+      "Current Cycle isn't available for this Capacity window."
+    }
+
+    return VStack(
+      alignment: .leading,
+      spacing: CapacityHistoryWindowMetrics.sectionSpacing
+    ) {
+      ContentUnavailableView(
+        "Current Cycle Unavailable",
+        systemImage: "clock.badge.questionmark",
+        description: Text(description)
+      )
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+      HStack {
+        historyActionsMenu
+        Spacer(minLength: 0)
+      }
+    }
+    .padding(.top, 2)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
   @ViewBuilder
   private func chartContent(
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
+    summaryEndpoint: CapacityHistoryCurrentCycleEndpoint?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
+    activeResetsAt: Date?,
     trendLines: [CapacityHistoryTrendLine],
     selectedObservations: [CapacityObservation],
     now: Date
@@ -1591,10 +1837,12 @@ struct CapacityHistoryView: View {
     let errorDescription =
       viewModel.errorDescription ?? recorder.recordingErrorDescription
     let hasChartSeries =
-      !selectedObservations.isEmpty || liveTail != nil || !trendLines.isEmpty
+      !selectedObservations.isEmpty || liveTail != nil
+        || summaryEndpoint != nil || !trendLines.isEmpty
     let hasSeriesInViewport =
       !projection.observationsInRange.isEmpty
         || liveTail != nil
+        || summaryEndpoint != nil
         || !trendLines.isEmpty
     let canInspectChart =
       !isLoadingWithoutObservations
@@ -1646,6 +1894,9 @@ struct CapacityHistoryView: View {
         capacityChart(
           projection: projection,
           liveTail: liveTail,
+          summaryEndpoint: summaryEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
+          activeResetsAt: activeResetsAt,
           trendLines: trendLines,
           now: now
         )
@@ -1658,6 +1909,7 @@ struct CapacityHistoryView: View {
         historyStatusLine(
           projection: projection,
           liveTail: liveTail,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines,
           canInspectChart: canInspectChart
         )
@@ -1670,6 +1922,7 @@ struct CapacityHistoryView: View {
   private func historyStatusLine(
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
     trendLines: [CapacityHistoryTrendLine],
     canInspectChart: Bool
   ) -> some View {
@@ -1684,6 +1937,7 @@ struct CapacityHistoryView: View {
                 at: selectedDate,
                 projection: projection,
                 liveTail: liveTail,
+                currentCycleEndpoint: currentCycleEndpoint,
                 trendLines: trendLines
               )
             )
@@ -1708,6 +1962,9 @@ struct CapacityHistoryView: View {
   private func capacityChart(
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
+    summaryEndpoint: CapacityHistoryCurrentCycleEndpoint?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
+    activeResetsAt: Date?,
     trendLines: [CapacityHistoryTrendLine],
     now: Date
   ) -> some View {
@@ -1716,7 +1973,9 @@ struct CapacityHistoryView: View {
         projection.segments,
         rangeStart: projection.rangeStart,
         rangeEnd: projection.rangeEnd,
+        activeResetsAt: activeResetsAt,
         liveTail: liveTail,
+        summaryEndpoint: summaryEndpoint,
         plotWidth: chartPlotInsets.plotWidth
       )
       : nil
@@ -1948,6 +2207,7 @@ struct CapacityHistoryView: View {
           direction: -1,
           projection: projection,
           liveTail: liveTail,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       case .right:
@@ -1955,6 +2215,7 @@ struct CapacityHistoryView: View {
           direction: 1,
           projection: projection,
           liveTail: liveTail,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       default:
@@ -1968,6 +2229,7 @@ struct CapacityHistoryView: View {
           direction: -1,
           projection: projection,
           liveTail: liveTail,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       case .increment:
@@ -1975,6 +2237,7 @@ struct CapacityHistoryView: View {
           direction: 1,
           projection: projection,
           liveTail: liveTail,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       @unknown default:
@@ -2024,6 +2287,7 @@ struct CapacityHistoryView: View {
           at: $0,
           projection: projection,
           liveTail: liveTail,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       } ?? accessibilitySummary(for: projection)
@@ -2035,6 +2299,7 @@ struct CapacityHistoryView: View {
       CapacityHistoryChartAccessibilityDescriptor(
         projection: projection,
         liveTail: liveTail,
+        currentCycleEndpoint: currentCycleEndpoint,
         trendLines: trendLines
       )
     )
@@ -2044,20 +2309,18 @@ struct CapacityHistoryView: View {
     direction: Int,
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
     trendLines: [CapacityHistoryTrendLine]
   ) {
-    var dates = projection.observationsInRange.map(\.observedAt)
-    if let liveTail {
-      dates.append(liveTail.endsAt)
-    }
-    for trendLine in trendLines {
-      dates.append(trendLine.startsAt)
-      dates.append(trendLine.endsAt)
-    }
     viewModel.selectedDate = CapacityHistorySelectionPolicy.movedDate(
       from: viewModel.selectedDate,
       direction: direction,
-      availableDates: dates
+      availableDates: CapacityHistorySelectionPolicy.availableDates(
+        projection: projection,
+        liveTail: liveTail,
+        currentCycleEndpoint: currentCycleEndpoint,
+        trendLines: trendLines
+      )
     )
   }
 
@@ -2110,19 +2373,16 @@ struct CapacityHistoryView: View {
   }
 
   private func currentCycleTrendLines(
-    liveValue: CapacityHistoryLiveValue?,
-    window: CodexRateLimitWindow?,
+    presentation: CapacityHistoryCurrentCyclePresentation,
     now: Date
   ) -> [CapacityHistoryTrendLine] {
-    [
+    return [
       CapacityHistoryTrendLine.makeSinceReset(
-        liveValue: liveValue,
-        window: window,
-        isConnected: recorder.isConnected,
+        activeContext: presentation.activeContext,
         now: now
       ),
       CapacityHistoryTrendLine.makeEvenPace(
-        window: window,
+        context: presentation.context,
         now: now
       ),
     ]

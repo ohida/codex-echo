@@ -212,23 +212,14 @@ final class CapacityHistoryTests: XCTestCase {
   func testSinceResetTrendPassesThroughCycleStartAndCurrentValue() throws {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let reset = now.addingTimeInterval(3 * 60 * 60)
-    let window = CodexRateLimitWindow(
-      slot: .primary,
-      usedPercent: 40,
-      windowDurationMinutes: 300,
-      resetsAt: reset
-    )
     let trend = try XCTUnwrap(
       CapacityHistoryTrendLine.makeSinceReset(
-        liveValue: CapacityHistoryLiveValue(
+        activeContext: currentCycleContext(
           remainingPercent: 60,
           observedAt: now,
-          sessionID: nil,
           windowDurationMinutes: 300,
           resetsAt: reset
         ),
-        window: window,
-        isConnected: true,
         now: now
       )
     )
@@ -246,25 +237,17 @@ final class CapacityHistoryTests: XCTestCase {
     XCTAssertEqual(trend.endRemainingPercent, 0, accuracy: 0.001)
   }
 
-  func testSinceResetTrendUsesNowWhenTheLiveValueIsFreshButOlder() throws {
+  func testSinceResetTrendUsesNowWhenTheActiveContextIsFreshButOlder() throws {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let reset = now.addingTimeInterval(3 * 60 * 60)
     let trend = try XCTUnwrap(
       CapacityHistoryTrendLine.makeSinceReset(
-        liveValue: CapacityHistoryLiveValue(
+        activeContext: currentCycleContext(
           remainingPercent: 60,
           observedAt: now.addingTimeInterval(-5 * minute),
-          sessionID: nil,
           windowDurationMinutes: 300,
           resetsAt: reset
         ),
-        window: CodexRateLimitWindow(
-          slot: .primary,
-          usedPercent: 40,
-          windowDurationMinutes: 300,
-          resetsAt: reset
-        ),
-        isConnected: true,
         now: now
       )
     )
@@ -282,20 +265,12 @@ final class CapacityHistoryTests: XCTestCase {
 
     XCTAssertNil(
       CapacityHistoryTrendLine.makeSinceReset(
-        liveValue: CapacityHistoryLiveValue(
+        activeContext: currentCycleContext(
           remainingPercent: 99,
           observedAt: now,
-          sessionID: nil,
           windowDurationMinutes: 300,
           resetsAt: reset
         ),
-        window: CodexRateLimitWindow(
-          slot: .primary,
-          usedPercent: 1,
-          windowDurationMinutes: 300,
-          resetsAt: reset
-        ),
-        isConnected: true,
         now: now
       )
     )
@@ -306,9 +281,9 @@ final class CapacityHistoryTests: XCTestCase {
     let reset = now.addingTimeInterval(3 * 60 * 60)
     let trend = try XCTUnwrap(
       CapacityHistoryTrendLine.makeEvenPace(
-        window: CodexRateLimitWindow(
-          slot: .primary,
-          usedPercent: 40,
+        context: currentCycleContext(
+          remainingPercent: 60,
+          observedAt: now,
           windowDurationMinutes: 300,
           resetsAt: reset
         ),
@@ -322,44 +297,27 @@ final class CapacityHistoryTests: XCTestCase {
     XCTAssertEqual(trend.endsAt, reset)
   }
 
-  func testTrendProjectionRequiresAFreshConnectedLiveValue() {
+  func testTrendProjectionRequiresAFreshActiveContext() {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let reset = now.addingTimeInterval(2 * 60 * 60)
-    let window = CodexRateLimitWindow(
-      slot: .primary,
-      usedPercent: 50,
-      windowDurationMinutes: 300,
-      resetsAt: reset
-    )
-    let staleLive = CapacityHistoryLiveValue(
+    let staleContext = currentCycleContext(
       remainingPercent: 50,
       observedAt: now.addingTimeInterval(
         -CapacityHistoryProjection.gapThreshold - 1
       ),
-      sessionID: nil,
       windowDurationMinutes: 300,
       resetsAt: reset
     )
 
     XCTAssertNil(
       CapacityHistoryTrendLine.makeSinceReset(
-        liveValue: staleLive,
-        window: window,
-        isConnected: true,
+        activeContext: staleContext,
         now: now
       )
     )
     XCTAssertNil(
       CapacityHistoryTrendLine.makeSinceReset(
-        liveValue: CapacityHistoryLiveValue(
-          remainingPercent: 50,
-          observedAt: now,
-          sessionID: nil,
-          windowDurationMinutes: 300,
-          resetsAt: reset
-        ),
-        window: window,
-        isConnected: false,
+        activeContext: nil,
         now: now
       )
     )
@@ -1179,6 +1137,279 @@ final class CapacityHistoryTests: XCTestCase {
     XCTAssertEqual(descriptor.series.first?.dataPoints.count, 1)
   }
 
+  func testCurrentCycleDataPolicyExcludesRowsOutsideTheActiveCycle() {
+    let cycleStart = Date(timeIntervalSince1970: 1_800_000_000)
+    let now = cycleStart.addingTimeInterval(4.5 * 60)
+    let reset = cycleStart.addingTimeInterval(7 * 24 * 60 * 60)
+    let sessionID = UUID()
+    let current = CapacityObservation(
+      observedAt: now,
+      remainingPercent: 58,
+      sessionID: sessionID,
+      resetsAt: reset
+    )
+    let observations = [
+      CapacityObservation(
+        observedAt: cycleStart.addingTimeInterval(-30),
+        remainingPercent: 60,
+        sessionID: sessionID,
+        resetsAt: reset
+      ),
+      CapacityObservation(
+        observedAt: now.addingTimeInterval(-120),
+        remainingPercent: 12,
+        sessionID: sessionID,
+        resetsAt: reset.addingTimeInterval(-7 * 24 * 60 * 60)
+      ),
+      CapacityObservation(
+        observedAt: now.addingTimeInterval(-60),
+        remainingPercent: 20,
+        sessionID: sessionID,
+        resetsAt: nil
+      ),
+      current,
+    ]
+    let context = CapacityHistoryCurrentCycleContext(
+      windowDurationMinutes: 7 * 24 * 60,
+      resetsAt: reset,
+      endpoint: CapacityHistoryCurrentCycleEndpoint(
+        observedAt: now,
+        remainingPercent: 58
+      )
+    )
+
+    let matching = CapacityHistoryCurrentCycleDataPolicy.observations(
+      observations,
+      matching: context
+    )
+    XCTAssertEqual(matching, [current])
+
+    let projection = CapacityHistoryProjection(
+      observations: matching,
+      period: context.viewport.axisStyle.projectionPeriod,
+      viewport: context.viewport,
+      observedThrough: now
+    )
+    XCTAssertNil(projection.remainingPercent(at: cycleStart, liveTail: nil))
+    XCTAssertTrue(projection.changes.isEmpty)
+    XCTAssertEqual(projection.observedDecrease, 0)
+    XCTAssertEqual(projection.observedIncrease, 0)
+  }
+
+  func testRetainedEndpointRequiresNewerProvenanceThanStoredHistory() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = now.addingTimeInterval(4 * 24 * 60 * 60)
+    let context = CapacityHistoryCurrentCycleContext(
+      windowDurationMinutes: 7 * 24 * 60,
+      resetsAt: reset,
+      endpoint: CapacityHistoryCurrentCycleEndpoint(
+        observedAt: now,
+        remainingPercent: 58
+      )
+    )
+    let presentation = CapacityHistoryCurrentCyclePresentation.retained(context)
+
+    XCTAssertEqual(
+      CapacityHistoryCurrentCycleDataPolicy.retainedEndpoint(
+        presentation: presentation,
+        matchingObservations: []
+      ),
+      context.endpoint
+    )
+    for observedAt in [now, now.addingTimeInterval(1)] {
+      XCTAssertNil(
+        CapacityHistoryCurrentCycleDataPolicy.retainedEndpoint(
+          presentation: presentation,
+          matchingObservations: [
+            CapacityObservation(
+              observedAt: observedAt,
+              remainingPercent: 58,
+              sessionID: UUID(),
+              resetsAt: reset
+            ),
+          ]
+        )
+      )
+    }
+    XCTAssertNil(
+      CapacityHistoryCurrentCycleDataPolicy.retainedEndpoint(
+        presentation: presentation,
+        matchingObservations: [
+          CapacityObservation(
+            observedAt: now.addingTimeInterval(1),
+            remainingPercent: 57,
+            sessionID: UUID(),
+            resetsAt: reset
+          ),
+          CapacityObservation(
+            observedAt: now.addingTimeInterval(-1),
+            remainingPercent: 59,
+            sessionID: UUID(),
+            resetsAt: reset
+          ),
+        ]
+      )
+    )
+  }
+
+  func testActiveEndpointFillsVisualSummaryAndCurrentInspectionWithoutLiveTail()
+    throws
+  {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = now.addingTimeInterval(4 * 24 * 60 * 60)
+    let context = CapacityHistoryCurrentCycleContext(
+      windowDurationMinutes: 7 * 24 * 60,
+      resetsAt: reset,
+      endpoint: CapacityHistoryCurrentCycleEndpoint(
+        observedAt: now,
+        remainingPercent: 58
+      )
+    )
+    let presentation = CapacityHistoryCurrentCyclePresentation.active(context)
+
+    let summaryEndpoint = try XCTUnwrap(
+      CapacityHistoryCurrentCycleDataPolicy.activeSummaryEndpoint(
+        presentation: presentation,
+        hasLiveTail: false,
+        matchingObservations: []
+      )
+    )
+    XCTAssertEqual(summaryEndpoint, context.endpoint)
+    XCTAssertNil(
+      CapacityHistoryCurrentCycleDataPolicy.activeSummaryEndpoint(
+        presentation: presentation,
+        hasLiveTail: true,
+        matchingObservations: []
+      )
+    )
+    XCTAssertNil(
+      CapacityHistoryCurrentCycleDataPolicy.retainedEndpoint(
+        presentation: presentation,
+        matchingObservations: []
+      )
+    )
+
+    let viewport = context.viewport
+    let series = try XCTUnwrap(
+      CapacityHistoryCurrentCycleRenderPolicy.series(
+        [],
+        rangeStart: viewport.rangeStart,
+        rangeEnd: viewport.rangeEnd,
+        activeResetsAt: context.resetsAt,
+        summaryEndpoint: summaryEndpoint,
+        plotWidth: 600
+      )
+    )
+    XCTAssertEqual(series.samples.last?.observedAt, context.endpoint.observedAt)
+    XCTAssertEqual(
+      series.samples.last?.remainingPercent,
+      Double(context.endpoint.remainingPercent)
+    )
+
+    let projection = CapacityHistoryProjection(
+      observations: [],
+      period: viewport.axisStyle.projectionPeriod,
+      viewport: viewport,
+      observedThrough: now
+    )
+    let inspectionEndpoint = try XCTUnwrap(
+      CapacityHistoryCurrentCycleInspectionEndpoint.resolve(
+        current: summaryEndpoint,
+        lastReceived: nil
+      )
+    )
+    let inspection = CapacityHistoryInspectionCopy.description(
+      at: now,
+      projection: projection,
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
+    )
+    XCTAssertTrue(inspection.contains("Current Capacity 58%"))
+    XCTAssertFalse(inspection.contains("Capacity not observed"))
+
+    let descriptor = CapacityHistoryChartAccessibilityDescriptor(
+      projection: projection,
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
+    ).makeChartDescriptor()
+    let endpointSeries = try XCTUnwrap(
+      descriptor.series.first { $0.name == "Current Capacity" }
+    )
+    XCTAssertFalse(endpointSeries.isContinuous)
+    XCTAssertEqual(endpointSeries.dataPoints.count, 1)
+    XCTAssertFalse(
+      descriptor.series.contains { $0.name == "Last received Capacity" }
+    )
+    XCTAssertTrue(
+      CapacityHistorySelectionPolicy.availableDates(
+        projection: projection,
+        liveTail: nil,
+        currentCycleEndpoint: inspectionEndpoint,
+        trendLines: []
+      ).contains(context.endpoint.observedAt)
+    )
+  }
+
+  func testLastReceivedEndpointHasSeparateInspectionAndAXProvenance() throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = now.addingTimeInterval(4 * 24 * 60 * 60)
+    let endpoint = CapacityHistoryCurrentCycleEndpoint(
+      observedAt: now,
+      remainingPercent: 58
+    )
+    let inspectionEndpoint = try XCTUnwrap(
+      CapacityHistoryCurrentCycleInspectionEndpoint.resolve(
+        current: nil,
+        lastReceived: endpoint
+      )
+    )
+    let projection = CapacityHistoryProjection(
+      observations: [],
+      period: .sevenDays,
+      viewport: CapacityHistoryViewport(
+        rangeStart: reset.addingTimeInterval(-7 * 24 * 60 * 60),
+        rangeEnd: reset,
+        axisStyle: .sevenDays,
+        title: "Current Cycle",
+        includesFuture: true
+      ),
+      observedThrough: now
+    )
+
+    let endpointCopy = CapacityHistoryInspectionCopy.description(
+      at: now,
+      projection: projection,
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
+    )
+    let laterCopy = CapacityHistoryInspectionCopy.description(
+      at: now.addingTimeInterval(60),
+      projection: projection,
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
+    )
+    XCTAssertTrue(endpointCopy.contains("Last received Capacity 58%"))
+    XCTAssertFalse(endpointCopy.contains("Capacity not observed"))
+    XCTAssertTrue(laterCopy.contains("Capacity not observed"))
+
+    let descriptor = CapacityHistoryChartAccessibilityDescriptor(
+      projection: projection,
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
+    ).makeChartDescriptor()
+    let endpointSeries = try XCTUnwrap(
+      descriptor.series.first { $0.name == "Last received Capacity" }
+    )
+    XCTAssertFalse(endpointSeries.isContinuous)
+    XCTAssertEqual(endpointSeries.dataPoints.count, 1)
+    XCTAssertFalse(
+      descriptor.series.contains { $0.name == "Capacity remaining" }
+    )
+    XCTAssertFalse(
+      descriptor.series.contains { $0.name == "Current Capacity" }
+    )
+  }
+
   func testHistoryChartDescriptorKeepsObservationSegmentsSeparate() {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let firstSession = UUID()
@@ -1520,7 +1751,7 @@ final class CapacityHistoryTests: XCTestCase {
   }
 
   @MainActor
-  func testCurrentCycleFallsBackWhenLiveSnapshotDisappears() async throws {
+  func testCurrentCycleIntentSurvivesWhenLiveSnapshotDisappears() async throws {
     let fileURL = temporaryHistoryURL()
     defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
     let store = CapacityHistoryStore(fileURL: fileURL)
@@ -1545,11 +1776,11 @@ final class CapacityHistoryTests: XCTestCase {
 
     viewModel.reconcileLimitSelection(snapshot: nil)
 
-    XCTAssertEqual(viewModel.selectedRange, .twentyFourHours)
+    XCTAssertEqual(viewModel.selectedRange, .currentWindow)
   }
 
   @MainActor
-  func testCurrentCycleWaitsForTheInitialLiveSnapshotBeforeFallingBack() {
+  func testCurrentCycleKeepsIntentWhileWaitingForTheInitialLiveSnapshot() {
     let fileURL = temporaryHistoryURL()
     defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
     let viewModel = CapacityHistoryViewModel(
@@ -1562,23 +1793,20 @@ final class CapacityHistoryTests: XCTestCase {
   }
 
   @MainActor
-  func testCurrentCycleFallsBackWhenInitialUsageReadIsUnavailable() {
+  func testCurrentCycleIntentSurvivesWhenInitialUsageReadIsUnavailable() {
     let fileURL = temporaryHistoryURL()
     defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
     let viewModel = CapacityHistoryViewModel(
       store: CapacityHistoryStore(fileURL: fileURL)
     )
 
-    viewModel.reconcileLimitSelection(
-      snapshot: nil,
-      usageAvailability: .unavailable
-    )
+    viewModel.reconcileLimitSelection(snapshot: nil)
 
-    XCTAssertEqual(viewModel.selectedRange, .twentyFourHours)
+    XCTAssertEqual(viewModel.selectedRange, .currentWindow)
   }
 
   @MainActor
-  func testSelectingAHistoryOnlyLimitFallsBackFromCurrentCycle() async throws {
+  func testSelectingAHistoryOnlyLimitPreservesCurrentCycleIntent() async throws {
     let fileURL = temporaryHistoryURL()
     defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
     let store = CapacityHistoryStore(fileURL: fileURL)
@@ -1603,7 +1831,7 @@ final class CapacityHistoryTests: XCTestCase {
     viewModel.selectLimit(.shortWindow, snapshot: snapshot)
 
     XCTAssertEqual(viewModel.selectedLimit, .shortWindow)
-    XCTAssertEqual(viewModel.selectedRange, .twentyFourHours)
+    XCTAssertEqual(viewModel.selectedRange, .currentWindow)
   }
 
   @MainActor
@@ -1644,11 +1872,11 @@ final class CapacityHistoryTests: XCTestCase {
     )
 
     await viewModel.refreshAndReconcile {
-      (snapshot: liveSnapshot, usageAvailability: .available)
+      (snapshot: liveSnapshot, retainedLimits: [])
     }
 
     XCTAssertEqual(viewModel.selectedLimit, .shortWindow)
-    XCTAssertEqual(viewModel.selectedRange, .twentyFourHours)
+    XCTAssertEqual(viewModel.selectedRange, .currentWindow)
     XCTAssertEqual(
       defaults.integer(
         forKey: CapacityHistoryViewModel.selectedLimitDurationDefaultsKey
@@ -1695,7 +1923,7 @@ final class CapacityHistoryTests: XCTestCase {
 
     await viewModel.refreshAndReconcile {
       historyCountWhenLiveStateWasRead = viewModel.observations.count
-      return (snapshot: liveSnapshot, usageAvailability: .available)
+      return (snapshot: liveSnapshot, retainedLimits: [])
     }
 
     XCTAssertEqual(historyCountWhenLiveStateWasRead, 1)
@@ -2477,6 +2705,22 @@ final class CapacityHistoryTests: XCTestCase {
       )
     )
     XCTAssertFalse(window.isReleasedWhenClosed)
+  }
+
+  private func currentCycleContext(
+    remainingPercent: Int,
+    observedAt: Date,
+    windowDurationMinutes: Int,
+    resetsAt: Date
+  ) -> CapacityHistoryCurrentCycleContext {
+    CapacityHistoryCurrentCycleContext(
+      windowDurationMinutes: windowDurationMinutes,
+      resetsAt: resetsAt,
+      endpoint: CapacityHistoryCurrentCycleEndpoint(
+        observedAt: observedAt,
+        remainingPercent: remainingPercent
+      )
+    )
   }
 
   private func temporaryHistoryURL() -> URL {
