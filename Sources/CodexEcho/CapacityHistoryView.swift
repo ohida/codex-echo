@@ -521,6 +521,26 @@ struct CapacityHistoryLoadGeneration {
 }
 
 enum CapacityHistorySelectionPolicy {
+  static func availableDates(
+    projection: CapacityHistoryProjection,
+    liveTail: CapacityHistoryLiveTail?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
+    trendLines: [CapacityHistoryTrendLine]
+  ) -> [Date] {
+    var dates = projection.observationsInRange.map(\.observedAt)
+    if let liveTail {
+      dates.append(liveTail.endsAt)
+    }
+    if let currentCycleEndpoint {
+      dates.append(currentCycleEndpoint.endpoint.observedAt)
+    }
+    for trendLine in trendLines {
+      dates.append(trendLine.startsAt)
+      dates.append(trendLine.endsAt)
+    }
+    return dates
+  }
+
   static func movedDate(
     from selectedDate: Date?,
     direction: Int,
@@ -535,6 +555,58 @@ enum CapacityHistorySelectionPolicy {
       return dates.last(where: { $0 < selectedDate }) ?? dates.first
     }
     return dates.first(where: { $0 > selectedDate }) ?? dates.last
+  }
+}
+
+enum CapacityHistoryCurrentCycleInspectionEndpoint: Equatable {
+  case current(CapacityHistoryCurrentCycleEndpoint)
+  case lastReceived(CapacityHistoryCurrentCycleEndpoint)
+
+  static func resolve(
+    current: CapacityHistoryCurrentCycleEndpoint?,
+    lastReceived: CapacityHistoryCurrentCycleEndpoint?
+  ) -> Self? {
+    if let current {
+      return .current(current)
+    }
+    if let lastReceived {
+      return .lastReceived(lastReceived)
+    }
+    return nil
+  }
+
+  var endpoint: CapacityHistoryCurrentCycleEndpoint {
+    switch self {
+    case .current(let endpoint), .lastReceived(let endpoint):
+      endpoint
+    }
+  }
+
+  var inspectionDescription: String {
+    switch self {
+    case .current(let endpoint):
+      "Current Capacity \(endpoint.remainingPercent)%"
+    case .lastReceived(let endpoint):
+      "Last received Capacity \(endpoint.remainingPercent)%"
+    }
+  }
+
+  var accessibilitySeriesName: String {
+    switch self {
+    case .current:
+      "Current Capacity"
+    case .lastReceived:
+      "Last received Capacity"
+    }
+  }
+
+  var accessibilityQualifier: String {
+    switch self {
+    case .current:
+      "current"
+    case .lastReceived:
+      "last received"
+    }
   }
 }
 
@@ -599,7 +671,7 @@ enum CapacityHistoryInspectionCopy {
     at selectedDate: Date,
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
-    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint? = nil,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint? = nil,
     trendLines: [CapacityHistoryTrendLine] = [],
     calendar: Calendar = .autoupdatingCurrent
   ) -> String {
@@ -610,12 +682,13 @@ enum CapacityHistoryInspectionCopy {
       ),
     ]
     if
-      let lastReceivedEndpoint,
-      abs(lastReceivedEndpoint.observedAt.timeIntervalSince(selectedDate)) < 0.5
+      let currentCycleEndpoint,
+      abs(
+        currentCycleEndpoint.endpoint.observedAt
+          .timeIntervalSince(selectedDate)
+      ) < 0.5
     {
-      parts.append(
-        "Last received Capacity \(lastReceivedEndpoint.remainingPercent)%"
-      )
+      parts.append(currentCycleEndpoint.inspectionDescription)
     } else if let remainingPercent = projection.remainingPercent(
       at: selectedDate,
       liveTail: liveTail
@@ -640,7 +713,7 @@ struct CapacityHistoryChartAccessibilityDescriptor:
 {
   let projection: CapacityHistoryProjection
   let liveTail: CapacityHistoryLiveTail?
-  var lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint? = nil
+  var currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint? = nil
   var trendLines: [CapacityHistoryTrendLine] = []
   var calendar: Calendar = .autoupdatingCurrent
 
@@ -728,24 +801,25 @@ struct CapacityHistoryChartAccessibilityDescriptor:
         )
       }
     }
-    if let lastReceivedEndpoint {
+    if let currentCycleEndpoint {
+      let endpoint = currentCycleEndpoint.endpoint
       series.append(
         AXDataSeriesDescriptor(
-          name: "Last received Capacity",
+          name: currentCycleEndpoint.accessibilitySeriesName,
           isContinuous: false,
           dataPoints: [
             AXDataPoint(
-              x: lastReceivedEndpoint.observedAt
+              x: endpoint.observedAt
                 .timeIntervalSinceReferenceDate,
-              y: Double(lastReceivedEndpoint.remainingPercent),
+              y: Double(endpoint.remainingPercent),
               additionalValues: [],
               label: [
                 CapacityHistoryDateTimeCopy.abbreviated(
-                  lastReceivedEndpoint.observedAt,
+                  endpoint.observedAt,
                   calendar: calendar
                 ),
-                "\(lastReceivedEndpoint.remainingPercent) percent remaining",
-                "last received",
+                "\(endpoint.remainingPercent) percent remaining",
+                currentCycleEndpoint.accessibilityQualifier,
               ].joined(separator: ", ")
             ),
           ]
@@ -1388,6 +1462,11 @@ struct CapacityHistoryView: View {
         )
         : nil
       let summaryEndpoint = lastReceivedEndpoint ?? activeSummaryEndpoint
+      let inspectionEndpoint =
+        CapacityHistoryCurrentCycleInspectionEndpoint.resolve(
+          current: activeSummaryEndpoint,
+          lastReceived: lastReceivedEndpoint
+        )
       let trendLines = viewModel.selectedRange == .currentWindow
         ? currentCycleTrendLines(
           presentation: currentCyclePresentation,
@@ -1430,7 +1509,7 @@ struct CapacityHistoryView: View {
             projection: projection,
             liveTail: liveTail,
             summaryEndpoint: summaryEndpoint,
-            lastReceivedEndpoint: lastReceivedEndpoint,
+            currentCycleEndpoint: inspectionEndpoint,
             activeResetsAt: viewModel.selectedRange == .currentWindow
               ? currentCyclePresentation.resetsAt
               : nil,
@@ -1747,7 +1826,7 @@ struct CapacityHistoryView: View {
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
     summaryEndpoint: CapacityHistoryCurrentCycleEndpoint?,
-    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
     activeResetsAt: Date?,
     trendLines: [CapacityHistoryTrendLine],
     selectedObservations: [CapacityObservation],
@@ -1816,7 +1895,7 @@ struct CapacityHistoryView: View {
           projection: projection,
           liveTail: liveTail,
           summaryEndpoint: summaryEndpoint,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           activeResetsAt: activeResetsAt,
           trendLines: trendLines,
           now: now
@@ -1830,7 +1909,7 @@ struct CapacityHistoryView: View {
         historyStatusLine(
           projection: projection,
           liveTail: liveTail,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines,
           canInspectChart: canInspectChart
         )
@@ -1843,7 +1922,7 @@ struct CapacityHistoryView: View {
   private func historyStatusLine(
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
-    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
     trendLines: [CapacityHistoryTrendLine],
     canInspectChart: Bool
   ) -> some View {
@@ -1858,7 +1937,7 @@ struct CapacityHistoryView: View {
                 at: selectedDate,
                 projection: projection,
                 liveTail: liveTail,
-                lastReceivedEndpoint: lastReceivedEndpoint,
+                currentCycleEndpoint: currentCycleEndpoint,
                 trendLines: trendLines
               )
             )
@@ -1884,7 +1963,7 @@ struct CapacityHistoryView: View {
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
     summaryEndpoint: CapacityHistoryCurrentCycleEndpoint?,
-    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
     activeResetsAt: Date?,
     trendLines: [CapacityHistoryTrendLine],
     now: Date
@@ -2128,7 +2207,7 @@ struct CapacityHistoryView: View {
           direction: -1,
           projection: projection,
           liveTail: liveTail,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       case .right:
@@ -2136,7 +2215,7 @@ struct CapacityHistoryView: View {
           direction: 1,
           projection: projection,
           liveTail: liveTail,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       default:
@@ -2150,7 +2229,7 @@ struct CapacityHistoryView: View {
           direction: -1,
           projection: projection,
           liveTail: liveTail,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       case .increment:
@@ -2158,7 +2237,7 @@ struct CapacityHistoryView: View {
           direction: 1,
           projection: projection,
           liveTail: liveTail,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       @unknown default:
@@ -2208,7 +2287,7 @@ struct CapacityHistoryView: View {
           at: $0,
           projection: projection,
           liveTail: liveTail,
-          lastReceivedEndpoint: lastReceivedEndpoint,
+          currentCycleEndpoint: currentCycleEndpoint,
           trendLines: trendLines
         )
       } ?? accessibilitySummary(for: projection)
@@ -2220,7 +2299,7 @@ struct CapacityHistoryView: View {
       CapacityHistoryChartAccessibilityDescriptor(
         projection: projection,
         liveTail: liveTail,
-        lastReceivedEndpoint: lastReceivedEndpoint,
+        currentCycleEndpoint: currentCycleEndpoint,
         trendLines: trendLines
       )
     )
@@ -2230,24 +2309,18 @@ struct CapacityHistoryView: View {
     direction: Int,
     projection: CapacityHistoryProjection,
     liveTail: CapacityHistoryLiveTail?,
-    lastReceivedEndpoint: CapacityHistoryCurrentCycleEndpoint?,
+    currentCycleEndpoint: CapacityHistoryCurrentCycleInspectionEndpoint?,
     trendLines: [CapacityHistoryTrendLine]
   ) {
-    var dates = projection.observationsInRange.map(\.observedAt)
-    if let liveTail {
-      dates.append(liveTail.endsAt)
-    }
-    if let lastReceivedEndpoint {
-      dates.append(lastReceivedEndpoint.observedAt)
-    }
-    for trendLine in trendLines {
-      dates.append(trendLine.startsAt)
-      dates.append(trendLine.endsAt)
-    }
     viewModel.selectedDate = CapacityHistorySelectionPolicy.movedDate(
       from: viewModel.selectedDate,
       direction: direction,
-      availableDates: dates
+      availableDates: CapacityHistorySelectionPolicy.availableDates(
+        projection: projection,
+        liveTail: liveTail,
+        currentCycleEndpoint: currentCycleEndpoint,
+        trendLines: trendLines
+      )
     )
   }
 

@@ -1252,7 +1252,7 @@ final class CapacityHistoryTests: XCTestCase {
     )
   }
 
-  func testActiveEndpointFillsOnlyTheVisualSummaryWithoutALiveTail()
+  func testActiveEndpointFillsVisualSummaryAndCurrentInspectionWithoutLiveTail()
     throws
   {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -1312,12 +1312,41 @@ final class CapacityHistoryTests: XCTestCase {
       viewport: viewport,
       observedThrough: now
     )
+    let inspectionEndpoint = try XCTUnwrap(
+      CapacityHistoryCurrentCycleInspectionEndpoint.resolve(
+        current: summaryEndpoint,
+        lastReceived: nil
+      )
+    )
+    let inspection = CapacityHistoryInspectionCopy.description(
+      at: now,
+      projection: projection,
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
+    )
+    XCTAssertTrue(inspection.contains("Current Capacity 58%"))
+    XCTAssertFalse(inspection.contains("Capacity not observed"))
+
     let descriptor = CapacityHistoryChartAccessibilityDescriptor(
       projection: projection,
-      liveTail: nil
+      liveTail: nil,
+      currentCycleEndpoint: inspectionEndpoint
     ).makeChartDescriptor()
+    let endpointSeries = try XCTUnwrap(
+      descriptor.series.first { $0.name == "Current Capacity" }
+    )
+    XCTAssertFalse(endpointSeries.isContinuous)
+    XCTAssertEqual(endpointSeries.dataPoints.count, 1)
     XCTAssertFalse(
       descriptor.series.contains { $0.name == "Last received Capacity" }
+    )
+    XCTAssertTrue(
+      CapacityHistorySelectionPolicy.availableDates(
+        projection: projection,
+        liveTail: nil,
+        currentCycleEndpoint: inspectionEndpoint,
+        trendLines: []
+      ).contains(context.endpoint.observedAt)
     )
   }
 
@@ -1327,6 +1356,12 @@ final class CapacityHistoryTests: XCTestCase {
     let endpoint = CapacityHistoryCurrentCycleEndpoint(
       observedAt: now,
       remainingPercent: 58
+    )
+    let inspectionEndpoint = try XCTUnwrap(
+      CapacityHistoryCurrentCycleInspectionEndpoint.resolve(
+        current: nil,
+        lastReceived: endpoint
+      )
     )
     let projection = CapacityHistoryProjection(
       observations: [],
@@ -1345,13 +1380,13 @@ final class CapacityHistoryTests: XCTestCase {
       at: now,
       projection: projection,
       liveTail: nil,
-      lastReceivedEndpoint: endpoint
+      currentCycleEndpoint: inspectionEndpoint
     )
     let laterCopy = CapacityHistoryInspectionCopy.description(
       at: now.addingTimeInterval(60),
       projection: projection,
       liveTail: nil,
-      lastReceivedEndpoint: endpoint
+      currentCycleEndpoint: inspectionEndpoint
     )
     XCTAssertTrue(endpointCopy.contains("Last received Capacity 58%"))
     XCTAssertFalse(endpointCopy.contains("Capacity not observed"))
@@ -1360,7 +1395,7 @@ final class CapacityHistoryTests: XCTestCase {
     let descriptor = CapacityHistoryChartAccessibilityDescriptor(
       projection: projection,
       liveTail: nil,
-      lastReceivedEndpoint: endpoint
+      currentCycleEndpoint: inspectionEndpoint
     ).makeChartDescriptor()
     let endpointSeries = try XCTUnwrap(
       descriptor.series.first { $0.name == "Last received Capacity" }
