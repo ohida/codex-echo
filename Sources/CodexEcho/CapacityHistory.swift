@@ -235,6 +235,160 @@ struct CapacityHistoryLiveValue: Equatable, Sendable {
   let resetsAt: Date?
 }
 
+struct CapacityHistoryCurrentCycleEndpoint: Equatable, Sendable {
+  let observedAt: Date
+  let remainingPercent: Int
+
+  init(observedAt: Date, remainingPercent: Int) {
+    self.observedAt = observedAt
+    self.remainingPercent = min(max(remainingPercent, 0), 100)
+  }
+}
+
+struct CapacityHistoryCurrentCycleContext: Equatable, Sendable {
+  let windowDurationMinutes: Int
+  let resetsAt: Date
+  let endpoint: CapacityHistoryCurrentCycleEndpoint
+
+  var viewport: CapacityHistoryViewport {
+    CapacityHistoryViewport(
+      rangeStart: resetsAt.addingTimeInterval(
+        -TimeInterval(windowDurationMinutes * 60)
+      ),
+      rangeEnd: resetsAt,
+      axisStyle: .currentWindow(durationMinutes: windowDurationMinutes),
+      title: "Current Cycle",
+      includesFuture: true
+    )
+  }
+
+  func isValid(
+    for limit: CapacityHistoryLimit,
+    now: Date
+  ) -> Bool {
+    guard
+      windowDurationMinutes > 0,
+      windowDurationMinutes == limit.windowDurationMinutes,
+      resetsAt > now,
+      endpoint.observedAt <= now
+    else { return false }
+    let rangeStart = resetsAt.addingTimeInterval(
+      -TimeInterval(windowDurationMinutes * 60)
+    )
+    return rangeStart <= endpoint.observedAt && rangeStart <= now
+      && endpoint.observedAt <= resetsAt
+  }
+}
+
+enum CapacityHistoryCurrentCycleContextPolicy {
+  static func validContexts(
+    _ contexts: [Int: CapacityHistoryCurrentCycleContext],
+    now: Date
+  ) -> [Int: CapacityHistoryCurrentCycleContext] {
+    contexts.filter { duration, context in
+      context.isValid(
+        for: CapacityHistoryLimit(windowDurationMinutes: duration),
+        now: now
+      )
+    }
+  }
+}
+
+enum CapacityHistoryCurrentCycleUnavailableReason: Equatable, Sendable {
+  case awaiting
+  case unavailableForLimit
+}
+
+enum CapacityHistoryCurrentCyclePresentation: Equatable, Sendable {
+  case active(CapacityHistoryCurrentCycleContext)
+  case retained(CapacityHistoryCurrentCycleContext)
+  case unavailable(CapacityHistoryCurrentCycleUnavailableReason)
+
+  var context: CapacityHistoryCurrentCycleContext? {
+    switch self {
+    case .active(let context), .retained(let context): context
+    case .unavailable: nil
+    }
+  }
+
+  var viewport: CapacityHistoryViewport? { context?.viewport }
+  var endpoint: CapacityHistoryCurrentCycleEndpoint? { context?.endpoint }
+  var resetsAt: Date? { context?.resetsAt }
+
+  var activeContext: CapacityHistoryCurrentCycleContext? {
+    guard case .active(let context) = self else { return nil }
+    return context
+  }
+
+  static func resolve(
+    limit: CapacityHistoryLimit,
+    receivedLiveValue: CapacityHistoryLiveValue?,
+    context: CapacityHistoryCurrentCycleContext?,
+    snapshot: CodexUsageSnapshot?,
+    isConnected: Bool,
+    now: Date
+  ) -> Self {
+    let validContext = context.flatMap {
+      $0.isValid(for: limit, now: now) ? $0 : nil
+    }
+
+    if let snapshot {
+      let durationWindows = snapshot.windows.filter {
+        $0.windowDurationMinutes == limit.windowDurationMinutes
+      }
+      guard !durationWindows.isEmpty else {
+        return .unavailable(.unavailableForLimit)
+      }
+      let validWindows = durationWindows.filter { window in
+        guard let resetsAt = window.resetsAt else { return false }
+        let rangeStart = resetsAt.addingTimeInterval(
+          -TimeInterval(limit.windowDurationMinutes * 60)
+        )
+        return resetsAt > now && rangeStart <= now
+      }
+      guard !validWindows.isEmpty else {
+        return .unavailable(.awaiting)
+      }
+      guard
+        let validContext,
+        validWindows.contains(where: {
+          CapacityHistoryResetBoundary.matches(
+            $0.resetsAt,
+            validContext.resetsAt
+          )
+            && $0.remainingPercent
+              == validContext.endpoint.remainingPercent
+        })
+      else {
+        return .unavailable(.awaiting)
+      }
+    }
+
+    if
+      isConnected,
+      let validContext,
+      let receivedLiveValue,
+      receivedLiveValue.windowDurationMinutes == limit.windowDurationMinutes,
+      receivedLiveValue.observedAt == validContext.endpoint.observedAt,
+      receivedLiveValue.remainingPercent
+        == validContext.endpoint.remainingPercent,
+      CapacityHistoryResetBoundary.matches(
+        receivedLiveValue.resetsAt,
+        validContext.resetsAt
+      )
+    {
+      return .active(validContext)
+    }
+
+    if let validContext {
+      return .retained(validContext)
+    }
+    return .unavailable(
+      snapshot == nil ? .awaiting : .unavailableForLimit
+    )
+  }
+}
+
 enum CapacityHistoryTrendKind: String, CaseIterable, Identifiable, Sendable {
   case sinceReset
   case evenPace
@@ -288,94 +442,64 @@ struct CapacityHistoryTrendLine: Equatable, Identifiable, Sendable {
   }
 
   static func makeSinceReset(
-    liveValue: CapacityHistoryLiveValue?,
-    window: CodexRateLimitWindow?,
-    isConnected: Bool,
+    activeContext: CapacityHistoryCurrentCycleContext?,
     now: Date,
     freshnessInterval: TimeInterval = CapacityHistoryProjection.gapThreshold
   ) -> Self? {
-    guard let context = liveContext(
-      liveValue: liveValue,
-      window: window,
-      isConnected: isConnected,
-      now: now,
-      freshnessInterval: freshnessInterval
-    ) else { return nil }
-    let elapsed = now.timeIntervalSince(context.windowStart)
+    guard
+      let activeContext,
+      activeContext.isValid(
+        for: CapacityHistoryLimit(
+          windowDurationMinutes: activeContext.windowDurationMinutes
+        ),
+        now: now
+      ),
+      now.timeIntervalSince(activeContext.endpoint.observedAt)
+        <= freshnessInterval
+    else { return nil }
+    let windowStart = activeContext.resetsAt.addingTimeInterval(
+      -TimeInterval(activeContext.windowDurationMinutes * 60)
+    )
+    guard windowStart <= now else { return nil }
+    let elapsed = now.timeIntervalSince(windowStart)
     guard elapsed >= minimumCycleDuration else { return nil }
 
     return projectedLine(
       kind: .sinceReset,
-      startsAt: context.windowStart,
+      startsAt: windowStart,
       startRemainingPercent: 100,
       observedAt: now,
-      currentRemainingPercent: context.currentRemainingPercent,
-      resetsAt: context.resetsAt
+      currentRemainingPercent: Double(
+        activeContext.endpoint.remainingPercent
+      ),
+      resetsAt: activeContext.resetsAt
     )
   }
 
   static func makeEvenPace(
-    window: CodexRateLimitWindow?,
+    context: CapacityHistoryCurrentCycleContext?,
     now: Date
   ) -> Self? {
     guard
-      let durationMinutes = window?.windowDurationMinutes,
-      durationMinutes > 0,
-      let resetsAt = window?.resetsAt,
-      resetsAt > now
+      let context,
+      context.isValid(
+        for: CapacityHistoryLimit(
+          windowDurationMinutes: context.windowDurationMinutes
+        ),
+        now: now
+      )
     else { return nil }
-    let windowStart = resetsAt.addingTimeInterval(
-      -TimeInterval(durationMinutes * 60)
+    let windowStart = context.resetsAt.addingTimeInterval(
+      -TimeInterval(context.windowDurationMinutes * 60)
     )
     guard windowStart <= now else { return nil }
     return Self(
       kind: .evenPace,
       startsAt: windowStart,
-      endsAt: resetsAt,
+      endsAt: context.resetsAt,
       startRemainingPercent: 100,
       endRemainingPercent: 0,
       predictedDepletionAt: nil
-    )
-  }
-
-  private struct LiveContext {
-    let windowStart: Date
-    let resetsAt: Date
-    let currentRemainingPercent: Double
-  }
-
-  private static func liveContext(
-    liveValue: CapacityHistoryLiveValue?,
-    window: CodexRateLimitWindow?,
-    isConnected: Bool,
-    now: Date,
-    freshnessInterval: TimeInterval
-  ) -> LiveContext? {
-    guard
-      isConnected,
-      let liveValue,
-      let window,
-      let durationMinutes = window.windowDurationMinutes,
-      durationMinutes > 0,
-      durationMinutes == liveValue.windowDurationMinutes,
-      let resetsAt = window.resetsAt,
-      let liveResetsAt = liveValue.resetsAt,
-      CapacityHistoryResetBoundary.matches(liveResetsAt, resetsAt),
-      resetsAt > now,
-      liveValue.observedAt <= now,
-      now.timeIntervalSince(liveValue.observedAt) <= freshnessInterval
-    else { return nil }
-    let windowStart = resetsAt.addingTimeInterval(
-      -TimeInterval(durationMinutes * 60)
-    )
-    guard windowStart <= now else { return nil }
-    return LiveContext(
-      windowStart: windowStart,
-      resetsAt: resetsAt,
-      currentRemainingPercent: min(
-        max(Double(liveValue.remainingPercent), 0),
-        100
-      )
     )
   }
 
@@ -1015,10 +1139,18 @@ final class CapacityHistoryRecorder: ObservableObject {
   @Published private(set) var liveValuesByDuration: [Int: CapacityHistoryLiveValue] = [:]
   @Published private(set) var recordingErrorDescription: String?
 
+  @Published private var currentCycleContextsByDuration:
+    [Int: CapacityHistoryCurrentCycleContext] = [:]
+
+  @Published private var receivedLiveValuesByDuration:
+    [Int: CapacityHistoryLiveValue] = [:]
+
   private let model: CodexActivityModel
   private let store: CapacityHistoryStore
   private let now: @Sendable () -> Date
   private let makeSessionID: @Sendable () -> UUID
+  private let sleepForCurrentCycleExpiry:
+    @Sendable (_ milliseconds: Int64) async -> Void
   private struct PolicyKey: Hashable {
     let slot: CodexRateLimitWindowSlot
     let durationMinutes: Int?
@@ -1026,18 +1158,25 @@ final class CapacityHistoryRecorder: ObservableObject {
 
   private var policies: [PolicyKey: CapacityHistoryRecordingPolicy] = [:]
   private var isClearing = false
+  private var currentCycleExpiryTask: Task<Void, Never>?
   private var cancellables = Set<AnyCancellable>()
 
   init(
     model: CodexActivityModel,
     store: CapacityHistoryStore,
     now: @escaping @Sendable () -> Date = Date.init,
-    makeSessionID: @escaping @Sendable () -> UUID = { UUID() }
+    makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
+    sleepForCurrentCycleExpiry: @escaping @Sendable (
+      _ milliseconds: Int64
+    ) async -> Void = { milliseconds in
+      try? await Task.sleep(for: .milliseconds(milliseconds))
+    }
   ) {
     self.model = model
     self.store = store
     self.now = now
     self.makeSessionID = makeSessionID
+    self.sleepForCurrentCycleExpiry = sleepForCurrentCycleExpiry
     isRecordingEnabled = model.settings.recordsCapacityHistory
 
     model.$appServerConnectionState
@@ -1060,6 +1199,10 @@ final class CapacityHistoryRecorder: ObservableObject {
         self?.handleRecordingEnabled(isEnabled)
       }
       .store(in: &cancellables)
+  }
+
+  deinit {
+    currentCycleExpiryTask?.cancel()
   }
 
   func clearHistory() async throws {
@@ -1106,22 +1249,37 @@ final class CapacityHistoryRecorder: ObservableObject {
     liveObservedAt = nil
     liveSessionID = nil
     liveValuesByDuration = [:]
+    receivedLiveValuesByDuration = [:]
   }
 
   private func handleUsageSnapshot(_ snapshot: CodexUsageSnapshot?) {
-    guard let snapshot, model.appServerConnectionState == .running else {
+    guard let snapshot else {
       liveRemainingPercent = nil
       liveObservedAt = nil
       liveSessionID = nil
       liveValuesByDuration = [:]
+      receivedLiveValuesByDuration = [:]
       return
     }
     let observedAt = now()
+    replaceCurrentCycleContexts(
+      snapshot: snapshot,
+      observedAt: observedAt
+    )
+    guard model.appServerConnectionState == .running else {
+      liveRemainingPercent = nil
+      liveObservedAt = nil
+      liveSessionID = nil
+      liveValuesByDuration = [:]
+      receivedLiveValuesByDuration = [:]
+      return
+    }
     let observations = capture(
       snapshot: snapshot,
       observedAt: observedAt,
       recordsHistory: !isClearing && isRecordingEnabled
     )
+    receivedLiveValuesByDuration = liveValuesByDuration
     for observation in observations {
       persist(observation)
     }
@@ -1154,6 +1312,102 @@ final class CapacityHistoryRecorder: ObservableObject {
     for limit: CapacityHistoryLimit
   ) -> CapacityHistoryLiveValue? {
     liveValuesByDuration[limit.windowDurationMinutes]
+  }
+
+  func receivedLiveValue(
+    for limit: CapacityHistoryLimit
+  ) -> CapacityHistoryLiveValue? {
+    receivedLiveValuesByDuration[limit.windowDurationMinutes]
+  }
+
+  func currentCycleContext(
+    for limit: CapacityHistoryLimit,
+    now: Date
+  ) -> CapacityHistoryCurrentCycleContext? {
+    guard
+      let context = currentCycleContextsByDuration[
+        limit.windowDurationMinutes
+      ],
+      context.isValid(for: limit, now: now)
+    else { return nil }
+    return context
+  }
+
+  func retainedCurrentCycleLimits(
+    now: Date
+  ) -> [CapacityHistoryLimit] {
+    currentCycleContextsByDuration.values
+      .filter {
+        $0.isValid(
+          for: CapacityHistoryLimit(
+            windowDurationMinutes: $0.windowDurationMinutes
+          ),
+          now: now
+        )
+      }
+      .map {
+        CapacityHistoryLimit(
+          windowDurationMinutes: $0.windowDurationMinutes
+        )
+      }
+      .sorted { $0.windowDurationMinutes < $1.windowDurationMinutes }
+  }
+
+  private func replaceCurrentCycleContexts(
+    snapshot: CodexUsageSnapshot,
+    observedAt: Date
+  ) {
+    var contexts: [Int: CapacityHistoryCurrentCycleContext] = [:]
+    for window in snapshot.windows {
+      guard
+        let durationMinutes = window.windowDurationMinutes,
+        durationMinutes > 0,
+        let resetsAt = window.resetsAt,
+        resetsAt > observedAt
+      else { continue }
+      let rangeStart = resetsAt.addingTimeInterval(
+        -TimeInterval(durationMinutes * 60)
+      )
+      guard rangeStart <= observedAt else { continue }
+      contexts[durationMinutes] = CapacityHistoryCurrentCycleContext(
+        windowDurationMinutes: durationMinutes,
+        resetsAt: resetsAt,
+        endpoint: CapacityHistoryCurrentCycleEndpoint(
+          observedAt: observedAt,
+          remainingPercent: window.remainingPercent
+        )
+      )
+    }
+    currentCycleContextsByDuration = contexts
+    scheduleCurrentCycleExpiry()
+  }
+
+  private func scheduleCurrentCycleExpiry() {
+    currentCycleExpiryTask?.cancel()
+    guard let nextReset = currentCycleContextsByDuration.values
+      .map(\.resetsAt)
+      .min()
+    else {
+      currentCycleExpiryTask = nil
+      return
+    }
+    let delayMilliseconds = Int64(
+      ceil(max(nextReset.timeIntervalSince(now()), 0) * 1_000)
+    )
+    let sleepForCurrentCycleExpiry = sleepForCurrentCycleExpiry
+    currentCycleExpiryTask = Task { @MainActor [weak self] in
+      await sleepForCurrentCycleExpiry(delayMilliseconds)
+      guard !Task.isCancelled, let self else { return }
+      let expirationTime = self.now()
+      let validContexts = CapacityHistoryCurrentCycleContextPolicy.validContexts(
+        self.currentCycleContextsByDuration,
+        now: expirationTime
+      )
+      if validContexts != self.currentCycleContextsByDuration {
+        self.currentCycleContextsByDuration = validContexts
+      }
+      self.scheduleCurrentCycleExpiry()
+    }
   }
 
   private func capture(
