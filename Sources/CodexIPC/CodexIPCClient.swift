@@ -61,7 +61,8 @@ struct CodexIPCReadStateChange: Equatable, Sendable {
     subscribedConversationIDs: Set<String>
   ) {
     guard message["method"] as? String == "thread-read-state-changed",
-      (message["version"] as? NSNumber)?.intValue == 2,
+      let version = (message["version"] as? NSNumber)?.intValue,
+      [2, 3].contains(version),
       let params = message["params"] as? [String: Any],
       params["hostId"] as? String == "local",
       let conversationID = params["conversationId"] as? String,

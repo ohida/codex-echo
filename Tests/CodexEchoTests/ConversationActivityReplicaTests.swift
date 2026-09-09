@@ -196,6 +196,55 @@ final class ConversationActivityReplicaTests: XCTestCase {
     XCTAssertTrue(replica.activities.isEmpty)
   }
 
+  @MainActor
+  func testMissedReadBroadcastIsRecoveredByPeriodicSnapshotAtSameRevision() {
+    let replica = ConversationActivityReplica()
+    XCTAssertTrue(replica.unreadCompletionIDsForReconciliation(at: 100).isEmpty)
+    replica.replaceSnapshot(
+      conversationID: "thread-1", revision: 75,
+      state: conversationState(title: "Completed", hasUnreadTurn: true)
+    )
+    XCTAssertTrue(replica.unreadCompletionIDsForReconciliation(at: 159).isEmpty)
+    XCTAssertEqual(replica.unreadCompletionIDsForReconciliation(at: 160), ["thread-1"])
+    XCTAssertTrue(replica.activity(for: "thread-1")?.isUnread == true)
+    XCTAssertTrue(replica.unreadCompletionIDsForReconciliation(at: 165).isEmpty)
+
+    // No read event or stream revision change is required for recovery.
+    replica.replaceSnapshot(
+      conversationID: "thread-1", revision: 75,
+      state: conversationState(title: "Completed", hasUnreadTurn: false)
+    )
+    XCTAssertEqual(replica.activity(for: "thread-1")?.isUnread, false)
+    XCTAssertTrue(replica.unreadCompletionIDsForReconciliation(at: 220).isEmpty)
+  }
+
+  @MainActor
+  func testUnreadReconciliationRetriesButExcludesWorkingAndRemovedTasks() throws {
+    let replica = ConversationActivityReplica()
+    replica.replaceSnapshot(
+      conversationID: "thread-1", revision: 1,
+      state: conversationState(title: "Completed", hasUnreadTurn: true)
+    )
+    var working = conversationState(id: "working", title: "Working", hasUnreadTurn: true)
+    try working.apply([JSONPatch(
+      operation: .replace,
+      path: [.key("threadRuntimeStatus"), .key("type")],
+      value: .string("active")
+    )])
+    replica.replaceSnapshot(conversationID: "working", revision: 1, state: working)
+    XCTAssertEqual(replica.activity(for: "working")?.state, .working)
+    XCTAssertEqual(replica.unreadCompletionIDsForReconciliation(at: 0), ["thread-1"])
+    XCTAssertEqual(replica.unreadCompletionIDsForReconciliation(at: 60), ["thread-1"])
+    replica.remove("thread-1")
+    XCTAssertTrue(replica.unreadCompletionIDsForReconciliation(at: 120).isEmpty)
+    replica.removeAll()
+    replica.replaceSnapshot(
+      conversationID: "thread-1", revision: 1,
+      state: conversationState(title: "New connection", hasUnreadTurn: true)
+    )
+    XCTAssertEqual(replica.unreadCompletionIDsForReconciliation(at: 121), ["thread-1"])
+  }
+
   private func conversationState(
     id: String = "thread-1",
     title: String,
