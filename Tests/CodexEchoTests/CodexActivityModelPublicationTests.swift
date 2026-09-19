@@ -194,6 +194,46 @@ final class CodexActivityModelPublicationTests: XCTestCase {
     XCTAssertEqual(model.taskCatalogSnapshot?.taskIDs, ["known"])
   }
 
+  @MainActor
+  func testOpeningUnreadTaskMarksItReadBeforeNavigating() throws {
+    let suiteName = "CodexActivityModelPublicationTests-\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let ipcClient = CodexIPCClient()
+    let appServerClient = CodexAppServerClient(
+      executableURL: URL(fileURLWithPath: "/usr/bin/false")
+    )
+    var openedURL: URL?
+    let model = CodexActivityModel(
+      ipcClient: ipcClient,
+      appServerClient: appServerClient,
+      desktopAppController: PublicationTestDesktopAppController(),
+      settings: MenuBarSettings(userDefaults: defaults),
+      userDefaults: defaults,
+      startsTransportClients: false,
+      taskURLOpener: { openedURL = $0 }
+    )
+    let known = try XCTUnwrap(CodexThreadDescriptor(object: [
+      "id": "known",
+      "name": "Known",
+    ]))
+    appServerClient.eventHandler?(.threadsChanged([known]))
+    ipcClient.eventHandler?(.snapshot(
+      conversationID: "known",
+      revision: 1,
+      state: completedConversationState(id: "known", title: "Known", isUnread: true)
+    ))
+    let task = try XCTUnwrap(model.tasks.first)
+    XCTAssertTrue(task.showsUnreadCompletionSignal)
+
+    model.openTask(task)
+
+    XCTAssertEqual(openedURL?.absoluteString, "codex://threads/known")
+    XCTAssertEqual(model.tasks.first?.isUnread, false)
+    XCTAssertEqual(model.tasks.first?.showsUnreadCompletionSignal, false)
+  }
+
   private func workingConversationState(
     id: String = "thread-1",
     title: String
@@ -220,6 +260,23 @@ final class CodexActivityModelPublicationTests: XCTestCase {
             ])
           ])
         ])
+      ]),
+    ])
+  }
+
+  private func completedConversationState(
+    id: String,
+    title: String,
+    isUnread: Bool
+  ) -> JSONValue {
+    .object([
+      "id": .string(id),
+      "title": .string(title),
+      "hasUnreadTurn": .bool(isUnread),
+      "unreadMessageCount": .number(isUnread ? 1 : 0),
+      "threadRuntimeStatus": .object([
+        "type": .string("idle"),
+        "activeFlags": .array([]),
       ]),
     ])
   }

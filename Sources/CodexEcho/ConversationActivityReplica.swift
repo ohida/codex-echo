@@ -27,20 +27,6 @@ final class ConversationActivityReplica {
   }
 
   private var conversationsByID: [String: StoredConversation] = [:]
-  private var lastUnreadReconciliationUptime: TimeInterval?
-
-  // Read-state broadcasts do not advance the stream revision. A missed one
-  // therefore needs an occasional snapshot even when no patch gap is detected.
-  func unreadCompletionIDsForReconciliation(at uptime: TimeInterval) -> Set<String> {
-    if let lastUnreadReconciliationUptime,
-      uptime - lastUnreadReconciliationUptime < 60
-    {
-      return []
-    }
-    lastUnreadReconciliationUptime = uptime
-    return Set(activities.filter { $0.isUnread && $0.state == .ready }.map(\.id))
-  }
-
   var activities: [ConversationActivity] {
     conversationsByID.values.map(\.activity)
   }
@@ -149,7 +135,6 @@ final class ConversationActivityReplica {
 
   func removeAll() {
     conversationsByID.removeAll()
-    lastUnreadReconciliationUptime = nil
   }
 
   private func evictInvalidConversation(_ conversationID: String) -> PatchResult {
