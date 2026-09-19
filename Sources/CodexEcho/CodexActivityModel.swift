@@ -1125,6 +1125,12 @@ final class CodexActivityModel: ObservableObject {
       let catalogIDs = taskCatalog.replace(with: threads)
       removeConversationsMissingFromCatalog(catalogIDs)
       ipcClient.setSubscriptions(catalogIDs)
+      let unreadIDs = conversationReplica.unreadCompletionIDsForReconciliation(
+        at: ProcessInfo.processInfo.systemUptime
+      )
+      for conversationID in unreadIDs.intersection(catalogIDs) {
+        ipcClient.requestSnapshot(for: conversationID)
+      }
       rebuildTasks()
       taskCatalogSnapshot = CodexTaskCatalogSnapshot(threads: threads)
     case .taskCatalogUnavailable:

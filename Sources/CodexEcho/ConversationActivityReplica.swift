@@ -27,6 +27,20 @@ final class ConversationActivityReplica {
   }
 
   private var conversationsByID: [String: StoredConversation] = [:]
+  private var lastUnreadReconciliationUptime: TimeInterval?
+
+  // Immediate read-state events and local task opening are the normal path.
+  // This snapshot fallback only repairs a missed broadcast, whose revision does
+  // not advance and therefore cannot be recovered by patch-gap handling.
+  func unreadCompletionIDsForReconciliation(at uptime: TimeInterval) -> Set<String> {
+    if let lastUnreadReconciliationUptime,
+      uptime - lastUnreadReconciliationUptime < 60
+    {
+      return []
+    }
+    lastUnreadReconciliationUptime = uptime
+    return Set(activities.filter { $0.isUnread && $0.state == .ready }.map(\.id))
+  }
   var activities: [ConversationActivity] {
     conversationsByID.values.map(\.activity)
   }
@@ -135,6 +149,7 @@ final class ConversationActivityReplica {
 
   func removeAll() {
     conversationsByID.removeAll()
+    lastUnreadReconciliationUptime = nil
   }
 
   private func evictInvalidConversation(_ conversationID: String) -> PatchResult {
