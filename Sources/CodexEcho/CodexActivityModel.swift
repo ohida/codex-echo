@@ -585,6 +585,7 @@ final class CodexActivityModel: ObservableObject {
   private let ipcClient: CodexIPCClient
   private let appServerClient: CodexAppServerClient
   private let desktopAppController: any CodexDesktopAppControlling
+  private let taskURLOpener: (URL) -> Void
   private let userDefaults: UserDefaults
   private var taskCatalog = CodexTaskCatalog()
   private let conversationReplica = ConversationActivityReplica()
@@ -609,7 +610,8 @@ final class CodexActivityModel: ObservableObject {
     userDefaults: UserDefaults = .standard,
     customizationStore: TaskCustomizationStore? = nil,
     debugTaskFixtureName: String? = nil,
-    startsTransportClients: Bool = true
+    startsTransportClients: Bool = true,
+    taskURLOpener: @escaping (URL) -> Void = { _ = NSWorkspace.shared.open($0) }
   ) {
     self.ipcClient = ipcClient
     self.appServerClient = appServerClient ?? CodexAppServerClient(
@@ -620,6 +622,7 @@ final class CodexActivityModel: ObservableObject {
       }
     )
     self.desktopAppController = desktopAppController
+    self.taskURLOpener = taskURLOpener
     self.desktopAppState = desktopAppController.state
     self.settings = settings
     self.userDefaults = userDefaults
@@ -826,7 +829,18 @@ final class CodexActivityModel: ObservableObject {
 
   func openTask(_ task: TaskPresentation) {
     guard let url = URL(string: "codex://threads/\(task.id)") else { return }
-    NSWorkspace.shared.open(url)
+    if case .applied(let transition) = conversationReplica.updateReadState(
+      conversationID: task.id,
+      hasUnreadTurn: false
+    ) {
+      updateCompletionLatch(
+        for: task.id,
+        previousActivity: transition.previous,
+        activity: transition.current
+      )
+      rebuildTasks()
+    }
+    taskURLOpener(url)
   }
 
   func openCodex() {
@@ -1111,12 +1125,6 @@ final class CodexActivityModel: ObservableObject {
       let catalogIDs = taskCatalog.replace(with: threads)
       removeConversationsMissingFromCatalog(catalogIDs)
       ipcClient.setSubscriptions(catalogIDs)
-      let unreadIDs = conversationReplica.unreadCompletionIDsForReconciliation(
-        at: ProcessInfo.processInfo.systemUptime
-      )
-      for conversationID in unreadIDs.intersection(catalogIDs) {
-        ipcClient.requestSnapshot(for: conversationID)
-      }
       rebuildTasks()
       taskCatalogSnapshot = CodexTaskCatalogSnapshot(threads: threads)
     case .taskCatalogUnavailable:
