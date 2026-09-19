@@ -446,6 +446,45 @@ final class StatusItemTaskPolicyTests: XCTestCase {
     )
   }
 
+  func testReadStateBroadcastVersionThreePreservesLocalSubscriptionBoundary() {
+    let params: [String: Any] = [
+      "hostId": "local",
+      "conversationId": "thread-1",
+      "hasUnreadTurn": false,
+      "context": [
+        "identity": ["type": "test"],
+        "executionHostKey": "test-host",
+      ],
+    ]
+    var message: [String: Any] = [
+      "method": "thread-read-state-changed",
+      "version": 3,
+      "params": params,
+    ]
+    let change = CodexIPCReadStateChange(
+      broadcast: message,
+      subscribedConversationIDs: ["thread-1"]
+    )
+    XCTAssertEqual(change?.conversationID, "thread-1")
+    XCTAssertEqual(change?.hasUnreadTurn, false)
+    XCTAssertNil(CodexIPCReadStateChange(
+      broadcast: message, subscribedConversationIDs: ["another-thread"]
+    ))
+
+    var remoteParams = params
+    remoteParams["hostId"] = "remote"
+    message["params"] = remoteParams
+    XCTAssertNil(CodexIPCReadStateChange(
+      broadcast: message, subscribedConversationIDs: ["thread-1"]
+    ))
+
+    message["params"] = params
+    message["version"] = 4
+    XCTAssertNil(CodexIPCReadStateChange(
+      broadcast: message, subscribedConversationIDs: ["thread-1"]
+    ))
+  }
+
   func testThreadCatalogBroadcastsUseVerifiedVersionsAndLocalHost() {
     let archiveMessage: [String: Any] = [
       "method": "thread-archived",
