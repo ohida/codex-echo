@@ -88,8 +88,10 @@ struct CodexIPCQueuedFollowUpsChange: Equatable, Sendable {
     subscribedConversationIDs: Set<String>
   ) {
     guard message["method"] as? String == "thread-queued-followups-changed",
-      (message["version"] as? NSNumber)?.intValue == 1,
+      let version = (message["version"] as? NSNumber)?.intValue,
+      [1, 2].contains(version),
       let params = message["params"] as? [String: Any],
+      version == 1 || params["hostId"] as? String == "local",
       let conversationID = params["conversationId"] as? String,
       subscribedConversationIDs.contains(conversationID),
       let messages = params["messages"] as? [Any]

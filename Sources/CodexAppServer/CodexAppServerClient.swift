@@ -126,12 +126,17 @@ enum CodexAppServerExecutableLocation: Equatable {
     if let override = environment["CODEX_EXECUTABLE"], !override.isEmpty {
       self = .available(URL(fileURLWithPath: override))
     } else if let codexApplicationURL {
-      self = .available(
-        codexApplicationURL.appendingPathComponent(
-          "Contents/Resources/codex",
-          isDirectory: false
-        )
-      )
+      let candidates = [
+        "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "Contents/Resources/codex",
+      ].map { codexApplicationURL.appendingPathComponent($0, isDirectory: false) }
+      if let executableURL = candidates.first(where: {
+        FileManager.default.isExecutableFile(atPath: $0.path)
+      }) {
+        self = .available(executableURL)
+      } else {
+        self = .unavailable
+      }
     } else {
       self = .unavailable
     }
