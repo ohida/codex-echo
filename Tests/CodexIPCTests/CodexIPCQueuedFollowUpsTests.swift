@@ -54,4 +54,77 @@ final class CodexIPCQueuedFollowUpsTests: XCTestCase {
       )
     )
   }
+
+  func testVersionTwoProjectsOnlyTheLocalSubscribedQueueCount() {
+    for count in [0, 2] {
+      let message: [String: Any] = [
+        "method": "thread-queued-followups-changed",
+        "version": 2,
+        "params": [
+          "hostId": "local",
+          "conversationId": "thread-1",
+          "messages": Array(repeating: ["text": "Ignored content"], count: count),
+        ],
+      ]
+
+      XCTAssertEqual(
+        CodexIPCQueuedFollowUpsChange(
+          broadcast: message,
+          subscribedConversationIDs: ["thread-1"]
+        ),
+        CodexIPCQueuedFollowUpsChange(conversationID: "thread-1", queuedCount: count)
+      )
+      XCTAssertNil(
+        CodexIPCQueuedFollowUpsChange(
+          broadcast: message,
+          subscribedConversationIDs: ["another-thread"]
+        )
+      )
+    }
+  }
+
+  func testVersionTwoRejectsRemoteMissingAndMalformedHosts() {
+    for hostID: Any? in ["remote-host", nil, NSNull(), 1] {
+      var params: [String: Any] = [
+        "conversationId": "thread-1",
+        "messages": [["text": "Ignored content"]],
+      ]
+      params["hostId"] = hostID
+      XCTAssertNil(
+        CodexIPCQueuedFollowUpsChange(
+          broadcast: [
+            "method": "thread-queued-followups-changed",
+            "version": 2,
+            "params": params,
+          ],
+          subscribedConversationIDs: ["thread-1"]
+        )
+      )
+    }
+  }
+
+  func testQueuedFollowUpsRejectsUnknownVersionsAndMalformedMessages() {
+    for version in [0, 3] {
+      XCTAssertNil(
+        CodexIPCQueuedFollowUpsChange(
+          broadcast: [
+            "method": "thread-queued-followups-changed",
+            "version": version,
+            "params": ["hostId": "local", "conversationId": "thread-1", "messages": []],
+          ],
+          subscribedConversationIDs: ["thread-1"]
+        )
+      )
+    }
+    XCTAssertNil(
+      CodexIPCQueuedFollowUpsChange(
+        broadcast: [
+          "method": "thread-queued-followups-changed",
+          "version": 2,
+          "params": ["hostId": "local", "conversationId": "thread-1", "messages": "invalid"],
+        ],
+        subscribedConversationIDs: ["thread-1"]
+      )
+    )
+  }
 }

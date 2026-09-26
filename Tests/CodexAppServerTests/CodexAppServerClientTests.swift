@@ -126,24 +126,78 @@ final class CodexAppServerClientTests: XCTestCase {
     )
   }
 
-  func testExecutableLocationUsesTheRegisteredCodexApplicationBundle() {
+  func testExecutableLocationUsesTheRegisteredCodexApplicationBundle() throws {
+    let applicationURL = try makeCodexApplication()
+    let executableURL = try installTestExecutable(
+      "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      in: applicationURL
+    )
     let location = CodexAppServerExecutableLocation(
-      codexApplicationURL: URL(fileURLWithPath: "/Users/example/Applications/Codex.app"),
+      codexApplicationURL: applicationURL,
       environment: [:]
     )
 
+    XCTAssertEqual(location.executableURL, executableURL)
+  }
+
+  func testExecutableLocationSupportsLegacyBundles() throws {
+    let applicationURL = try makeCodexApplication()
+    let executableURL = try installTestExecutable("Contents/Resources/codex", in: applicationURL)
+
     XCTAssertEqual(
-      location.executableURL?.path,
-      "/Users/example/Applications/Codex.app/Contents/Resources/codex"
+      CodexAppServerExecutableLocation(
+        codexApplicationURL: applicationURL,
+        environment: [:]
+      ).executableURL,
+      executableURL
+    )
+  }
+
+  func testExecutableLocationPrefersTheNestedCLIWhenBothLayoutsExist() throws {
+    let applicationURL = try makeCodexApplication()
+    _ = try installTestExecutable("Contents/Resources/codex", in: applicationURL)
+    let nestedCLI = try installTestExecutable(
+      "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      in: applicationURL
     )
 
-    let relocated = CodexAppServerExecutableLocation(
-      codexApplicationURL: URL(fileURLWithPath: "/Volumes/Tools/Codex.app"),
-      environment: [:]
+    XCTAssertEqual(
+      CodexAppServerExecutableLocation(
+        codexApplicationURL: applicationURL,
+        environment: [:]
+      ).executableURL,
+      nestedCLI
+    )
+  }
+
+  func testExecutableLocationSkipsANonExecutableNestedCLI() throws {
+    let applicationURL = try makeCodexApplication()
+    let legacyCLI = try installTestExecutable("Contents/Resources/codex", in: applicationURL)
+    let nestedCLI = try installTestExecutable(
+      "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      in: applicationURL
+    )
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: nestedCLI.path)
+
+    XCTAssertEqual(
+      CodexAppServerExecutableLocation(
+        codexApplicationURL: applicationURL,
+        environment: [:]
+      ).executableURL,
+      legacyCLI
+    )
+  }
+
+  func testExecutableLocationIsUnavailableWithoutABundledCLI() throws {
+    let applicationURL = try makeCodexApplication()
+
+    XCTAssertEqual(
+      CodexAppServerExecutableLocation(codexApplicationURL: applicationURL, environment: [:]),
+      .unavailable
     )
     XCTAssertEqual(
-      relocated.executableURL?.path,
-      "/Volumes/Tools/Codex.app/Contents/Resources/codex"
+      CodexAppServerExecutableLocation(codexApplicationURL: nil, environment: [:]),
+      .unavailable
     )
   }
 
@@ -157,25 +211,72 @@ final class CodexAppServerClientTests: XCTestCase {
     XCTAssertEqual(location.executableURL?.path, "/opt/codex/bin/codex")
   }
 
-  func testApplicationExecutableSourceResolvesAgainAfterTheBundleMoves() {
+  func testApplicationExecutableSourceResolvesAgainAfterTheBundleMoves() throws {
+    let originalURL = try makeCodexApplication()
+    let executableURL = try installTestExecutable(
+      "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      in: originalURL
+    )
     let applicationURL = OSAllocatedUnfairLock(
-      initialState: URL(fileURLWithPath: "/Users/example/Applications/Codex.app")
+      initialState: originalURL
     )
     let source = CodexAppServerExecutableSource.codexApplication {
       applicationURL.withLock { $0 }
     }
 
-    XCTAssertEqual(
-      source.resolve(environment: [:])?.path,
-      "/Users/example/Applications/Codex.app/Contents/Resources/codex"
-    )
+    XCTAssertEqual(source.resolve(environment: [:]), executableURL)
+    let relocatedURL = originalURL.deletingLastPathComponent()
+      .appendingPathComponent("Relocated Codex.app", isDirectory: true)
+    try FileManager.default.moveItem(at: originalURL, to: relocatedURL)
     applicationURL.withLock {
-      $0 = URL(fileURLWithPath: "/Volumes/Tools/Codex.app")
+      $0 = relocatedURL
     }
     XCTAssertEqual(
-      source.resolve(environment: [:])?.path,
-      "/Volumes/Tools/Codex.app/Contents/Resources/codex"
+      source.resolve(environment: [:]),
+      relocatedURL.appendingPathComponent(
+        "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+      )
     )
+  }
+
+  func testApplicationExecutableSourceDetectsAnUpdateFromLegacyToNestedCLI() throws {
+    let applicationURL = try makeCodexApplication()
+    let legacyCLI = try installTestExecutable("Contents/Resources/codex", in: applicationURL)
+    let source = CodexAppServerExecutableSource.codexApplication { applicationURL }
+    let launchedURL = try XCTUnwrap(source.resolve(environment: [:]))
+    let launched = try XCTUnwrap(CodexAppServerExecutableFingerprint(executableURL: launchedURL))
+    let nestedCLI = try installTestExecutable(
+      "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      in: applicationURL
+    )
+    try FileManager.default.removeItem(at: legacyCLI)
+
+    let currentURL = try XCTUnwrap(source.resolve(environment: [:]))
+    XCTAssertEqual(currentURL, nestedCLI)
+    let current = try XCTUnwrap(CodexAppServerExecutableFingerprint(executableURL: currentURL))
+    XCTAssertTrue(
+      CodexAppServerClient.shouldRestartForExecutableChange(launched: launched, current: current)
+    )
+  }
+
+  private func makeCodexApplication() throws -> URL {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let applicationURL = directory.appendingPathComponent("Codex.app", isDirectory: true)
+    try FileManager.default.createDirectory(at: applicationURL, withIntermediateDirectories: true)
+    addTeardownBlock { try FileManager.default.removeItem(at: directory) }
+    return applicationURL
+  }
+
+  private func installTestExecutable(_ relativePath: String, in applicationURL: URL) throws -> URL {
+    let executableURL = applicationURL.appendingPathComponent(relativePath)
+    try FileManager.default.createDirectory(
+      at: executableURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executableURL.path)
+    return executableURL
   }
 
   func testApplicationExecutableSourcePrioritizesTheEnvironmentOverride() {
