@@ -8,6 +8,20 @@ stable_feed_url="https://updates.ohida.app/codex-echo/appcast.xml"
 immutable_download_root="https://updates.ohida.app/codex-echo/releases"
 sparkle_version="2.9.4"
 sparkle_revision="b6496a74a087257ef5e6da1c5b29a447a60f5bd7"
+mcp_sdk_version="0.12.1"
+mcp_sdk_revision="a0ae212ebf6eab5f754c3129608bc5557637e605"
+eventsource_version="1.5.1"
+eventsource_revision="86b5096ac59ab46e66bd1f6377c604bc1dab0bc2"
+swift_atomics_version="1.3.1"
+swift_atomics_revision="0442cb5a3f98ab802acb777929fdb446bda11a34"
+swift_collections_version="1.6.0"
+swift_collections_revision="a0cb0954ecb21e4e31b0070e6ed5674e8556685a"
+swift_log_version="1.15.0"
+swift_log_revision="3ffafb9722d5d918c614feb496c8789a3b59d222"
+swift_nio_version="2.101.3"
+swift_nio_revision="0b18836bd8b0162e7e17a995a3fbee20ed8f3b2b"
+swift_system_version="1.8.1"
+swift_system_revision="869129b7bf4ecc57b97d0193ad29690ca2134750"
 sparkle_archive_url="https://github.com/sparkle-project/Sparkle/releases/download/2.9.4/Sparkle-for-Swift-Package-Manager.zip"
 sparkle_archive_sha256="cb6fdbdc8884f15d62a616e79face92b08322410fd2d425edc6596ccbf4ba3b0"
 sparkle_public_key="cMXp1w6Tx8sJunwcUo2JG7vQ/qO63do4we0TpqgV34s="
@@ -247,8 +261,12 @@ validate_source_package() {
   /usr/bin/swift package \
     --package-path "$source_root" \
     dump-package > "$package_description"
-  if ! /usr/bin/jq -e --arg sparkleVersion "$sparkle_version" '
+  if ! /usr/bin/jq -e \
+    --arg sparkleVersion "$sparkle_version" \
+    --arg mcpSDKVersion "$mcp_sdk_version" '
     def target($name): .targets[] | select(.name == $name);
+    def dependency($identity):
+      .dependencies[].sourceControl[0] | select(.identity == $identity);
     (.name == "CodexEcho")
     and (.toolsVersion._version == "6.0.0")
     and (.platforms == [{options: [], platformName: "macos", version: "14.0"}])
@@ -262,18 +280,28 @@ validate_source_package() {
     and (.products[0].name == "CodexEcho")
     and (.products[0].targets == ["CodexEcho"])
     and (.products[0].type.executable == null)
-    and (.dependencies | length == 1)
-    and (.dependencies[0].sourceControl | length == 1)
-    and (.dependencies[0].sourceControl[0].identity == "sparkle")
-    and (.dependencies[0].sourceControl[0].productFilter == null)
-    and (.dependencies[0].sourceControl[0].traits == [{name: "default"}])
+    and (.dependencies | length == 2)
+    and ([.dependencies[].sourceControl[0].identity] | sort
+      == ["sparkle", "swift-sdk"])
+    and all(.dependencies[];
+      (.sourceControl | length == 1)
+      and (.sourceControl[0].productFilter == null)
+      and (.sourceControl[0].traits == [{name: "default"}]))
     and (
-      .dependencies[0].sourceControl[0].location.remote[0].urlString
+      dependency("sparkle").location.remote[0].urlString
       == "https://github.com/sparkle-project/Sparkle"
     )
     and (
-      .dependencies[0].sourceControl[0].requirement.exact[0]
+      dependency("sparkle").requirement.exact[0]
       == $sparkleVersion
+    )
+    and (
+      dependency("swift-sdk").location.remote[0].urlString
+      == "https://github.com/modelcontextprotocol/swift-sdk"
+    )
+    and (
+      dependency("swift-sdk").requirement.exact[0]
+      == $mcpSDKVersion
     )
     and (
       [.targets[].name] | sort
@@ -303,6 +331,7 @@ validate_source_package() {
           end]
       | sort
       == [
+        "product:MCP@swift-sdk",
         "product:Sparkle@Sparkle",
         "target:CodexAppServer",
         "target:CodexIPC"
@@ -310,8 +339,15 @@ validate_source_package() {
     )
     and (target("CodexEchoTests").type == "test")
     and (
-      target("CodexEchoTests").dependencies
-      == [{byName: ["CodexEcho", null]}]
+      [target("CodexEchoTests").dependencies[]
+        | if has("byName") then "target:\(.byName[0])"
+          else "product:\(.product[0])@\(.product[1])"
+          end]
+      | sort
+      == [
+        "product:MCP@swift-sdk",
+        "target:CodexEcho"
+      ]
     )
     and (target("CodexIPCTests").type == "test")
     and (
@@ -328,17 +364,80 @@ validate_source_package() {
   /bin/rm -f -- "$package_description"
 
   if ! /usr/bin/jq -e \
-    --arg version "$sparkle_version" \
-    --arg revision "$sparkle_revision" '
-      (.pins | length == 1)
-      and (.pins[0].identity == "sparkle")
-      and (.pins[0].kind == "remoteSourceControl")
-      and (.pins[0].location == "https://github.com/sparkle-project/Sparkle")
-      and (.pins[0].state.version == $version)
-      and (.pins[0].state.revision == $revision)
+    --arg sparkleVersion "$sparkle_version" \
+    --arg sparkleRevision "$sparkle_revision" \
+    --arg mcpSDKVersion "$mcp_sdk_version" \
+    --arg mcpSDKRevision "$mcp_sdk_revision" \
+    --arg eventsourceVersion "$eventsource_version" \
+    --arg eventsourceRevision "$eventsource_revision" \
+    --arg swiftAtomicsVersion "$swift_atomics_version" \
+    --arg swiftAtomicsRevision "$swift_atomics_revision" \
+    --arg swiftCollectionsVersion "$swift_collections_version" \
+    --arg swiftCollectionsRevision "$swift_collections_revision" \
+    --arg swiftLogVersion "$swift_log_version" \
+    --arg swiftLogRevision "$swift_log_revision" \
+    --arg swiftNIOVersion "$swift_nio_version" \
+    --arg swiftNIORevision "$swift_nio_revision" \
+    --arg swiftSystemVersion "$swift_system_version" \
+    --arg swiftSystemRevision "$swift_system_revision" '
+      def pin($identity): .pins[] | select(.identity == $identity);
+      def matches($identity; $location; $version; $revision):
+        (pin($identity).kind == "remoteSourceControl")
+        and (pin($identity).location == $location)
+        and (pin($identity).state.version == $version)
+        and (pin($identity).state.revision == $revision);
+      (.pins | length == 8)
+      and matches(
+        "sparkle";
+        "https://github.com/sparkle-project/Sparkle";
+        $sparkleVersion;
+        $sparkleRevision
+      )
+      and matches(
+        "swift-sdk";
+        "https://github.com/modelcontextprotocol/swift-sdk";
+        $mcpSDKVersion;
+        $mcpSDKRevision
+      )
+      and matches(
+        "eventsource";
+        "https://github.com/mattt/eventsource.git";
+        $eventsourceVersion;
+        $eventsourceRevision
+      )
+      and matches(
+        "swift-atomics";
+        "https://github.com/apple/swift-atomics.git";
+        $swiftAtomicsVersion;
+        $swiftAtomicsRevision
+      )
+      and matches(
+        "swift-collections";
+        "https://github.com/apple/swift-collections.git";
+        $swiftCollectionsVersion;
+        $swiftCollectionsRevision
+      )
+      and matches(
+        "swift-log";
+        "https://github.com/apple/swift-log.git";
+        $swiftLogVersion;
+        $swiftLogRevision
+      )
+      and matches(
+        "swift-nio";
+        "https://github.com/apple/swift-nio.git";
+        $swiftNIOVersion;
+        $swiftNIORevision
+      )
+      and matches(
+        "swift-system";
+        "https://github.com/apple/swift-system.git";
+        $swiftSystemVersion;
+        $swiftSystemRevision
+      )
     ' "$source_root/Package.resolved" >/dev/null
   then
-    die "Package.resolved does not contain the reviewed Sparkle pin."
+    die "Package.resolved does not contain the reviewed dependency pins."
   fi
 }
 

@@ -31,6 +31,70 @@ validate_release_notes_file "$release_notes"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/codex-echo-release-builder.XXXXXX")"
 trap '/bin/rm -rf -- "$fixture_root"' EXIT
 
+source_root="$script_directory/.."
+source_fixture="$fixture_root/Source Package"
+/bin/mkdir -p "$source_fixture/Resources" "$source_fixture/release-notes"
+for file in Package.swift Package.resolved LICENSE THIRD_PARTY_NOTICES; do
+  /bin/cp "$source_root/$file" "$source_fixture/$file"
+done
+/bin/cp "$source_root/Resources/Info.plist" "$source_fixture/Resources/Info.plist"
+/bin/cp "$source_root/Resources/AppIcon-1024.png" \
+  "$source_fixture/Resources/AppIcon-1024.png"
+/bin/cp "$release_notes" "$source_fixture/release-notes/$release_version.md"
+
+RELEASE_VERSION="$release_version"
+RELEASE_BUILD="$(/usr/libexec/PlistBuddy \
+  -c 'Print :CFBundleVersion' \
+  "$source_fixture/Resources/Info.plist")"
+RELEASE_TAG="v$RELEASE_VERSION-build.$RELEASE_BUILD"
+validate_source_package "$source_fixture"
+
+expect_source_package_rejected() {
+  local label="$1"
+  local expected_error="$2"
+  local error_file="$fixture_root/source-package-error.txt"
+  if (validate_source_package "$source_fixture") > /dev/null 2> "$error_file"; then
+    fail_test "$label passed source-package validation."
+  fi
+  if [[ "$(<"$error_file")" != *"$expected_error"* ]]; then
+    fail_test "$label failed for an unexpected reason: $(<"$error_file")"
+  fi
+}
+
+/usr/bin/sed \
+  's/\.executable(name: "CodexEcho", targets: \["CodexEcho"\])/\.executable(name: "CodexEcho", targets: ["CodexEcho"]), .library(name: "CodexEchoInternals", targets: ["CodexIPC"])/' \
+  "$source_root/Package.swift" > "$source_fixture/Package.swift"
+if /usr/bin/cmp -s "$source_root/Package.swift" "$source_fixture/Package.swift"; then
+  fail_test "Could not create extra-library source-package fixture."
+fi
+expect_source_package_rejected \
+  "Extra library product" \
+  "The public package must expose only the CodexEcho executable."
+
+/usr/bin/sed 's/exact: "0.12.1"/exact: "0.12.2"/' \
+  "$source_root/Package.swift" > "$source_fixture/Package.swift"
+if /usr/bin/cmp -s "$source_root/Package.swift" "$source_fixture/Package.swift"; then
+  fail_test "Could not create MCP version source-package fixture."
+fi
+expect_source_package_rejected \
+  "MCP SDK version mismatch" \
+  "The public package must expose only the CodexEcho executable."
+/bin/cp "$source_root/Package.swift" "$source_fixture/Package.swift"
+
+/usr/bin/jq '.pins[-1] = .pins[0]' "$source_root/Package.resolved" \
+  > "$source_fixture/Package.resolved"
+expect_source_package_rejected \
+  "Duplicate pin replacing a required identity" \
+  "Package.resolved does not contain the reviewed dependency pins."
+
+/usr/bin/jq \
+  '(.pins[] | select(.identity == "swift-sdk").state.revision) = "0000000000000000000000000000000000000000"' \
+  "$source_root/Package.resolved" > "$source_fixture/Package.resolved"
+expect_source_package_rejected \
+  "MCP SDK revision mismatch" \
+  "Package.resolved does not contain the reviewed dependency pins."
+print -- "Release builder source-package allowlist tests passed."
+
 appcast_fixture="$fixture_root/appcast.xml"
 history_fixture="https://github.com/ohida/codex-echo/releases/tag/v$release_version-build.1"
 {
