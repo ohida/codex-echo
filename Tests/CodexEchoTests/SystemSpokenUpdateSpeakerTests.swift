@@ -75,6 +75,85 @@ final class SystemSpokenUpdateSpeakerTests: XCTestCase {
     )
   }
 
+  func testCuePlaybackScheduleSerializesDifferentCuesWithoutDroppingEither() {
+    var schedule = SpokenUpdateCuePlaybackSchedule()
+
+    let attention = schedule.plan(
+      now: 10,
+      cueDuration: ImportantAnnouncementCueWaveform.attentionDuration,
+      completionDelay:
+        ImportantAnnouncementCueWaveform.attentionSpeechDelay
+    )
+    let important = schedule.plan(
+      now: 10,
+      cueDuration: ImportantAnnouncementCueWaveform.duration,
+      completionDelay: ImportantAnnouncementCueWaveform.speechDelay
+    )
+
+    XCTAssertFalse(attention.resetsPendingPlayback)
+    XCTAssertEqual(
+      attention.completionDelay,
+      ImportantAnnouncementCueWaveform.attentionSpeechDelay,
+      accuracy: 0.000_1
+    )
+    XCTAssertFalse(important.resetsPendingPlayback)
+    XCTAssertEqual(
+      important.completionDelay,
+      ImportantAnnouncementCueWaveform.attentionDuration
+        + ImportantAnnouncementCueWaveform.speechDelay,
+      accuracy: 0.000_1
+    )
+  }
+
+  func testCuePlaybackScheduleBoundsBacklogAndKeepsTheNewestCue() {
+    var schedule = SpokenUpdateCuePlaybackSchedule()
+    for _ in 0..<4 {
+      let plan = schedule.plan(
+        now: 10,
+        cueDuration: ImportantAnnouncementCueWaveform.duration,
+        completionDelay: ImportantAnnouncementCueWaveform.speechDelay
+      )
+      XCTAssertFalse(plan.resetsPendingPlayback)
+    }
+
+    let newest = schedule.plan(
+      now: 10,
+      cueDuration: ImportantAnnouncementCueWaveform.duration,
+      completionDelay: ImportantAnnouncementCueWaveform.speechDelay
+    )
+
+    XCTAssertTrue(newest.resetsPendingPlayback)
+    XCTAssertEqual(
+      newest.completionDelay,
+      ImportantAnnouncementCueWaveform.speechDelay,
+      accuracy: 0.000_1
+    )
+  }
+
+  func testCuePlaybackScheduleResetClearsPendingAudio() {
+    var schedule = SpokenUpdateCuePlaybackSchedule()
+    _ = schedule.plan(
+      now: 10,
+      cueDuration: ImportantAnnouncementCueWaveform.duration,
+      completionDelay: ImportantAnnouncementCueWaveform.speechDelay
+    )
+
+    schedule.reset()
+    let next = schedule.plan(
+      now: 10,
+      cueDuration: ImportantAnnouncementCueWaveform.attentionDuration,
+      completionDelay:
+        ImportantAnnouncementCueWaveform.attentionSpeechDelay
+    )
+
+    XCTAssertFalse(next.resetsPendingPlayback)
+    XCTAssertEqual(
+      next.completionDelay,
+      ImportantAnnouncementCueWaveform.attentionSpeechDelay,
+      accuracy: 0.000_1
+    )
+  }
+
   func testStartupPlaybackDefersOtherAudioUntilStartupFinishes() {
     var gate = StartupExclusivePlaybackGate<String>()
 
@@ -168,6 +247,102 @@ final class SystemSpokenUpdateSpeakerTests: XCTestCase {
     XCTAssertEqual(gate.playbackDidBecomeIdle(), [])
   }
 
+  @MainActor
+  func testCueOnlyStartupDefersOtherCuesUntilPlaybackAndFollowUpGapFinish()
+    async throws
+  {
+    let cuePlayer = TestSpokenUpdateCuePlayer(
+      attentionDuration: 0.01,
+      importantDuration: 0.01
+    )
+    let speaker = SystemSpokenUpdateSpeaker(
+      cuePlayer: cuePlayer,
+      startupFollowUpDelay: 0.01
+    )
+    let deferredCuePlayed = expectation(description: "Deferred cue plays after Startup")
+    cuePlayer.onPlay = { cue in
+      if cue == .important { deferredCuePlayed.fulfill() }
+    }
+
+    speaker.playCue(.attention, channel: .startup)
+    speaker.playCue(.important, channel: .system)
+
+    XCTAssertEqual(cuePlayer.playedCues, [.attention])
+    await fulfillment(of: [deferredCuePlayed], timeout: 2)
+    XCTAssertEqual(cuePlayer.playedCues, [.attention, .important])
+    speaker.stopAll()
+  }
+
+  @MainActor
+  func testCueOnlyEventsFromTheSameObservationBothReachTheCuePlayer() {
+    let cuePlayer = TestSpokenUpdateCuePlayer(
+      attentionDuration: 0.1,
+      importantDuration: 0.1
+    )
+    let speaker = SystemSpokenUpdateSpeaker(cuePlayer: cuePlayer)
+
+    speaker.playCue(.attention, channel: .task("completed"))
+    speaker.playCue(.important, channel: .task("approval"))
+
+    XCTAssertEqual(cuePlayer.playedCues, [.attention, .important])
+    speaker.stopAll()
+  }
+
+  @MainActor
+  func testStoppingCueOnlyChannelCancelsItsLateCompletion() async throws {
+    let cuePlayer = TestSpokenUpdateCuePlayer(
+      attentionDuration: 0.02,
+      importantDuration: 0.08
+    )
+    let speaker = SystemSpokenUpdateSpeaker(
+      cuePlayer: cuePlayer,
+      startupFollowUpDelay: 0.005
+    )
+
+    speaker.playCue(.attention, channel: .preview)
+    XCTAssertEqual(speaker.activeCueOnlyPlaybackCount, 1)
+    speaker.stop(.preview)
+    XCTAssertEqual(speaker.activeCueOnlyPlaybackCount, 0)
+    speaker.playCue(.important, channel: .startup)
+    speaker.playCue(.attention, channel: .system)
+
+    let deferredCuePlayed = expectation(description: "Cancelled completion does not strand Startup")
+    cuePlayer.onPlay = { cue in
+      if cue == .attention { deferredCuePlayed.fulfill() }
+    }
+
+    XCTAssertEqual(cuePlayer.playedCues, [.attention, .important])
+    await fulfillment(of: [deferredCuePlayed], timeout: 2)
+    XCTAssertEqual(
+      cuePlayer.playedCues,
+      [.attention, .important, .attention]
+    )
+    speaker.stopAll()
+  }
+
+  @MainActor
+  func testStoppingAllCueOnlyPlaybackDropsDeferredCuesWithoutLateReplay()
+    async throws
+  {
+    let cuePlayer = TestSpokenUpdateCuePlayer(
+      attentionDuration: 0.01,
+      importantDuration: 0.05
+    )
+    let speaker = SystemSpokenUpdateSpeaker(
+      cuePlayer: cuePlayer,
+      startupFollowUpDelay: 0.005
+    )
+
+    speaker.playCue(.important, channel: .startup)
+    speaker.playCue(.attention, channel: .system)
+    speaker.stopAll()
+
+    XCTAssertEqual(speaker.activeCueOnlyPlaybackCount, 0)
+    try await Task<Never, Never>.sleep(nanoseconds: 80_000_000)
+    XCTAssertEqual(cuePlayer.playedCues, [.important])
+    XCTAssertEqual(cuePlayer.stopAllCallCount, 1)
+  }
+
   private func peakAmplitude(
     in samples: [Float],
     from startTime: TimeInterval,
@@ -177,5 +352,36 @@ final class SystemSpokenUpdateSpeakerTests: XCTestCase {
     let start = Int(startTime * sampleRate)
     let end = min(Int(endTime * sampleRate), samples.count)
     return samples[start..<end].map(abs).max() ?? 0
+  }
+}
+
+@MainActor
+private final class TestSpokenUpdateCuePlayer: SpokenUpdateCuePlaying {
+  private let attentionDuration: TimeInterval
+  private let importantDuration: TimeInterval
+  private(set) var playedCues: [SpokenUpdateCue] = []
+  private(set) var stopAllCallCount = 0
+  var onPlay: ((SpokenUpdateCue) -> Void)?
+
+  init(
+    attentionDuration: TimeInterval,
+    importantDuration: TimeInterval
+  ) {
+    self.attentionDuration = attentionDuration
+    self.importantDuration = importantDuration
+  }
+
+  func play(_ cue: SpokenUpdateCue) -> TimeInterval {
+    playedCues.append(cue)
+    onPlay?(cue)
+    return switch cue {
+    case .none: 0
+    case .attention: attentionDuration
+    case .important: importantDuration
+    }
+  }
+
+  func stopAll() {
+    stopAllCallCount += 1
   }
 }

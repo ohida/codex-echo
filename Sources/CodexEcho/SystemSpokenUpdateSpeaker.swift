@@ -94,7 +94,7 @@ struct StartupExclusivePlaybackGate<Item> {
 }
 
 @MainActor
-private protocol SpokenUpdateCuePlaying: AnyObject {
+protocol SpokenUpdateCuePlaying: AnyObject {
   func play(_ cue: SpokenUpdateCue) -> TimeInterval
   func stopAll()
 }
@@ -184,6 +184,39 @@ struct ImportantAnnouncementCueWaveform {
   }
 }
 
+struct SpokenUpdateCuePlaybackSchedule {
+  struct Plan: Equatable {
+    let resetsPendingPlayback: Bool
+    let completionDelay: TimeInterval
+    let shutdownDelay: TimeInterval
+  }
+
+  static let maximumQueuedDuration: TimeInterval = 0.75
+  private(set) var scheduledThrough: TimeInterval?
+
+  mutating func plan(
+    now: TimeInterval,
+    cueDuration: TimeInterval,
+    completionDelay: TimeInterval
+  ) -> Plan {
+    let queuedDuration = max(0, (scheduledThrough ?? now) - now)
+    let resetsPendingPlayback =
+      queuedDuration + cueDuration > Self.maximumQueuedDuration
+    let effectiveQueuedDuration = resetsPendingPlayback ? 0 : queuedDuration
+    scheduledThrough = now + effectiveQueuedDuration + cueDuration
+    let totalCompletionDelay = effectiveQueuedDuration + completionDelay
+    return Plan(
+      resetsPendingPlayback: resetsPendingPlayback,
+      completionDelay: totalCompletionDelay,
+      shutdownDelay: max(0.25, totalCompletionDelay + 0.03)
+    )
+  }
+
+  mutating func reset() {
+    scheduledThrough = nil
+  }
+}
+
 @MainActor
 private final class SystemSpokenUpdateCuePlayer: SpokenUpdateCuePlaying {
   private let engine = AVAudioEngine()
@@ -191,6 +224,7 @@ private final class SystemSpokenUpdateCuePlayer: SpokenUpdateCuePlaying {
   private let attentionBuffer: AVAudioPCMBuffer?
   private let importantBuffer: AVAudioPCMBuffer?
   private var shutdownTask: Task<Void, Never>?
+  private var playbackSchedule = SpokenUpdateCuePlaybackSchedule()
 
   init() {
     attentionBuffer = Self.makeBuffer(
@@ -212,34 +246,43 @@ private final class SystemSpokenUpdateCuePlayer: SpokenUpdateCuePlaying {
   func play(_ cue: SpokenUpdateCue) -> TimeInterval {
     let buffer: AVAudioPCMBuffer?
     let speechDelay: TimeInterval
+    let cueDuration: TimeInterval
     switch cue {
     case .none:
       return 0
     case .attention:
       buffer = attentionBuffer
       speechDelay = ImportantAnnouncementCueWaveform.attentionSpeechDelay
+      cueDuration = ImportantAnnouncementCueWaveform.attentionDuration
     case .important:
       buffer = importantBuffer
       speechDelay = ImportantAnnouncementCueWaveform.speechDelay
+      cueDuration = ImportantAnnouncementCueWaveform.duration
     }
     guard let buffer else { return 0 }
-    guard !player.isPlaying else {
-      return speechDelay
+    let plan = playbackSchedule.plan(
+      now: ProcessInfo.processInfo.systemUptime,
+      cueDuration: cueDuration,
+      completionDelay: speechDelay
+    )
+    if plan.resetsPendingPlayback {
+      player.stop()
     }
 
-    player.scheduleBuffer(buffer, at: nil, options: .interrupts)
+    player.scheduleBuffer(buffer, at: nil, options: [])
     if !engine.isRunning {
       engine.prepare()
       do {
         try engine.start()
       } catch {
         player.stop()
+        playbackSchedule.reset()
         return 0
       }
     }
     player.play()
-    scheduleShutdown()
-    return speechDelay
+    scheduleShutdown(after: plan.shutdownDelay)
+    return plan.completionDelay
   }
 
   func stopAll() {
@@ -247,18 +290,22 @@ private final class SystemSpokenUpdateCuePlayer: SpokenUpdateCuePlaying {
     shutdownTask = nil
     player.stop()
     engine.stop()
+    playbackSchedule.reset()
   }
 
-  private func scheduleShutdown() {
+  private func scheduleShutdown(after delay: TimeInterval) {
     shutdownTask?.cancel()
     shutdownTask = Task { @MainActor [weak self] in
       do {
-        try await Task.sleep(for: .milliseconds(250))
+        try await Task<Never, Never>.sleep(
+          nanoseconds: UInt64(delay * 1_000_000_000)
+        )
       } catch {
         return
       }
       self?.player.stop()
       self?.engine.stop()
+      self?.playbackSchedule.reset()
       self?.shutdownTask = nil
     }
   }
@@ -295,6 +342,7 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
   AVSpeechSynthesizerDelegate
 {
   static let rateMultiplier: Float = 1.08
+  static let maximumCueOnlyPlaybackDuration: TimeInterval = 1
 
   private struct ActiveChannel {
     let synthesizer: AVSpeechSynthesizer
@@ -302,20 +350,37 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
   }
 
   private struct PlaybackRequest {
-    let text: String
+    let text: String?
     let channel: SpokenUpdateChannel
     let voice: SpokenUpdateVoice
     let cue: SpokenUpdateCue
   }
 
+  private struct ActiveCuePlayback {
+    let channel: SpokenUpdateChannel
+    let completionTask: Task<Void, Never>
+  }
+
   private var activeChannels: [SpokenUpdateChannel: ActiveChannel] = [:]
   private var channelsBySynthesizerID: [ObjectIdentifier: SpokenUpdateChannel] = [:]
+  private var activeCuePlaybacks: [UUID: ActiveCuePlayback] = [:]
   private var startupGate = StartupExclusivePlaybackGate<PlaybackRequest>()
   private var startupFollowUpTask: Task<Void, Never>?
   private let cuePlayer: any SpokenUpdateCuePlaying
+  private let startupFollowUpDelay: TimeInterval
 
   override init() {
     cuePlayer = SystemSpokenUpdateCuePlayer()
+    startupFollowUpDelay = startupAnnouncementFollowUpDelay
+    super.init()
+  }
+
+  init(
+    cuePlayer: any SpokenUpdateCuePlaying,
+    startupFollowUpDelay: TimeInterval = startupAnnouncementFollowUpDelay
+  ) {
+    self.cuePlayer = cuePlayer
+    self.startupFollowUpDelay = startupFollowUpDelay
     super.init()
   }
 
@@ -328,19 +393,42 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
     dispatch(
       startupGate.enqueue(
         PlaybackRequest(
-          text: text,
+          text: .some(text),
           channel: channel,
           voice: voice,
           cue: cue
         ),
         isStartup: channel == .startup,
-        playbackIsIdle: activeChannels.isEmpty
+        playbackIsIdle: playbackIsIdle
+      )
+    )
+  }
+
+  func playCue(
+    _ cue: SpokenUpdateCue,
+    channel: SpokenUpdateChannel
+  ) {
+    dispatch(
+      startupGate.enqueue(
+        PlaybackRequest(
+          text: nil,
+          channel: channel,
+          voice: .defaultVoice,
+          cue: cue
+        ),
+        isStartup: channel == .startup,
+        playbackIsIdle: playbackIsIdle
       )
     )
   }
 
   private func start(_ request: PlaybackRequest) {
-    let utterance = AVSpeechUtterance(string: request.text)
+    guard let text = request.text else {
+      startCueOnly(request)
+      return
+    }
+
+    let utterance = AVSpeechUtterance(string: text)
     utterance.voice = Self.resolvedVoice(request.voice)
     utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Self.rateMultiplier
     utterance.preUtteranceDelay = cuePlayer.play(request.cue)
@@ -363,6 +451,44 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
     synthesizer.speak(utterance)
   }
 
+  private func startCueOnly(_ request: PlaybackRequest) {
+    let playbackDuration = cueOnlyPlaybackDuration(
+      from: cuePlayer.play(request.cue)
+    )
+    guard playbackDuration > 0 else {
+      if playbackIsIdle {
+        advanceStartupGateAfterPlaybackBecameIdle()
+      }
+      return
+    }
+
+    let identifier = UUID()
+    let completionTask = Task { @MainActor [weak self] in
+      do {
+        try await Task<Never, Never>.sleep(
+          nanoseconds: UInt64(playbackDuration * 1_000_000_000)
+        )
+      } catch {
+        return
+      }
+      self?.finishCuePlayback(identifier: identifier)
+    }
+    activeCuePlaybacks[identifier] = ActiveCuePlayback(
+      channel: request.channel,
+      completionTask: completionTask
+    )
+  }
+
+  private func cueOnlyPlaybackDuration(
+    from requestedDuration: TimeInterval
+  ) -> TimeInterval {
+    guard requestedDuration.isFinite else { return 0 }
+    return min(
+      max(requestedDuration, 0),
+      Self.maximumCueOnlyPlaybackDuration
+    )
+  }
+
   private func dispatch(_ requests: [PlaybackRequest]) {
     for request in requests {
       start(request)
@@ -371,6 +497,11 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
 
   func stopAll() {
     cuePlayer.stopAll()
+    let cueCompletionTasks = activeCuePlaybacks.values.map(\.completionTask)
+    activeCuePlaybacks.removeAll()
+    for task in cueCompletionTasks {
+      task.cancel()
+    }
     startupFollowUpTask?.cancel()
     startupFollowUpTask = nil
     startupGate.reset()
@@ -384,6 +515,13 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
 
   func stop(_ channel: SpokenUpdateChannel) {
     startupGate.removeDeferred { $0.channel == channel }
+    let cancelledCuePlaybacks = activeCuePlaybacks.filter {
+      $0.value.channel == channel
+    }
+    for (identifier, playback) in cancelledCuePlaybacks {
+      activeCuePlaybacks.removeValue(forKey: identifier)
+      playback.completionTask.cancel()
+    }
     let activeChannel = activeChannels.removeValue(forKey: channel)
     if let activeChannel {
       channelsBySynthesizerID.removeValue(
@@ -396,7 +534,9 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
       startupFollowUpTask?.cancel()
       startupFollowUpTask = nil
       dispatch(startupGate.cancelStartup())
-    } else if activeChannel != nil, activeChannels.isEmpty {
+    } else if activeChannel != nil || !cancelledCuePlaybacks.isEmpty,
+      playbackIsIdle
+    {
       advanceStartupGateAfterPlaybackBecameIdle()
     }
   }
@@ -431,12 +571,29 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
     if activeChannel.pendingUtteranceCount == 0 {
       activeChannels.removeValue(forKey: channel)
       channelsBySynthesizerID.removeValue(forKey: identifier)
-      if activeChannels.isEmpty {
+      if playbackIsIdle {
         advanceStartupGateAfterPlaybackBecameIdle()
       }
     } else {
       activeChannels[channel] = activeChannel
     }
+  }
+
+  private func finishCuePlayback(identifier: UUID) {
+    guard activeCuePlaybacks.removeValue(forKey: identifier) != nil else {
+      return
+    }
+    if playbackIsIdle {
+      advanceStartupGateAfterPlaybackBecameIdle()
+    }
+  }
+
+  private var playbackIsIdle: Bool {
+    activeChannels.isEmpty && activeCuePlaybacks.isEmpty
+  }
+
+  var activeCueOnlyPlaybackCount: Int {
+    activeCuePlaybacks.count
   }
 
   private func advanceStartupGateAfterPlaybackBecameIdle() {
@@ -445,11 +602,12 @@ final class SystemSpokenUpdateSpeaker: NSObject, SpokenUpdateSpeaking,
       startupFollowUpTask == nil
     else { return }
 
+    let followUpDelay = startupFollowUpDelay
     startupFollowUpTask = Task { @MainActor [weak self] in
       do {
         try await Task<Never, Never>.sleep(
           nanoseconds: UInt64(
-            startupAnnouncementFollowUpDelay * 1_000_000_000
+            followUpDelay * 1_000_000_000
           )
         )
       } catch {

@@ -1,12 +1,26 @@
 import XCTest
 
-@testable import CodexIPC
 @testable import CodexEcho
+@testable import CodexIPC
 
 private enum TestAnnouncementMode: Equatable {
   case off
   case keyEvents
   case allActivity
+}
+
+// Keep full-event coverage independent of the quieter product defaults.
+private func allEventsConfiguration() -> SpokenAnnouncementConfiguration {
+  var configuration = SpokenAnnouncementConfiguration.defaults
+  configuration.setAllEventsSpeak(true)
+  configuration.setAlertSound(.none, for: .usageTenPercent)
+  for event: SpokenAnnouncementEvent in [
+    .usageFivePercent, .usageOnePercent, .monitoringInterrupted,
+    .applicationOffline, .applicationOnline,
+  ] {
+    configuration.setAlertSound(.onePip, for: event)
+  }
+  return configuration
 }
 
 private func testDelivery(
@@ -16,9 +30,9 @@ private func testDelivery(
   let configuration: SpokenAnnouncementConfiguration
   switch mode {
   case .off:
-    configuration = .defaults
+    configuration = allEventsConfiguration()
   case .keyEvents:
-    var keyEvents = SpokenAnnouncementConfiguration.defaults
+    var keyEvents = allEventsConfiguration()
     keyEvents.setSpeaks(false, for: .directiveQueued)
     for event in SpokenAnnouncementEvent.taskActivityEvents {
       keyEvents.setSpeaks(false, for: event)
@@ -26,11 +40,12 @@ private func testDelivery(
     keyEvents.setSpeaks(false, for: .usageChanged)
     configuration = keyEvents
   case .allActivity:
-    configuration = .defaults
+    configuration = allEventsConfiguration()
   }
   var configuredDelivery = configuration
   if !speaksAtStartup {
     configuredDelivery.setSpeaks(false, for: .startupSummary)
+    configuredDelivery.setAlertSound(.none, for: .startupSummary)
   }
   return SpokenAnnouncementDelivery(
     isEnabled: mode != .off,
@@ -38,8 +53,8 @@ private func testDelivery(
   )
 }
 
-private extension UsageAnnouncementPolicy {
-  static func copy(
+extension UsageAnnouncementPolicy {
+  fileprivate static func copy(
     previousRemainingPercent: Int?,
     remainingPercent: Int,
     level: TestAnnouncementMode
@@ -51,7 +66,7 @@ private extension UsageAnnouncementPolicy {
     )?.text
   }
 
-  static func announcement(
+  fileprivate static func announcement(
     previousRemainingPercent: Int?,
     remainingPercent: Int,
     level: TestAnnouncementMode
@@ -65,8 +80,8 @@ private extension UsageAnnouncementPolicy {
 }
 
 @MainActor
-private extension SpokenUpdateAnnouncer {
-  func updateLevel(
+extension SpokenUpdateAnnouncer {
+  fileprivate func updateLevel(
     _ level: TestAnnouncementMode,
     speaksAtStartup: Bool = false
   ) {
@@ -78,14 +93,14 @@ private extension SpokenUpdateAnnouncer {
     )
   }
 
-  func observe(
+  fileprivate func observe(
     tasks: [TaskPresentation],
     level: TestAnnouncementMode
   ) {
     observe(tasks: tasks, delivery: testDelivery(level))
   }
 
-  func observeQueuedFollowUps(
+  fileprivate func observeQueuedFollowUps(
     taskID: String,
     queuedCount: Int,
     voice: SpokenUpdateVoice,
@@ -99,7 +114,7 @@ private extension SpokenUpdateAnnouncer {
     )
   }
 
-  func observeUsage(
+  fileprivate func observeUsage(
     remainingPercent: Int?,
     level: TestAnnouncementMode,
     speaksAtStartup: Bool = false
@@ -113,7 +128,7 @@ private extension SpokenUpdateAnnouncer {
     )
   }
 
-  func observeDesktopAppState(
+  fileprivate func observeDesktopAppState(
     _ state: CodexDesktopAppState,
     level: TestAnnouncementMode
   ) {
@@ -122,6 +137,207 @@ private extension SpokenUpdateAnnouncer {
 }
 
 final class SpokenUpdateTests: XCTestCase {
+  func testEveryEventKeepsSpeakAlertSoundAndMasterIndependent() {
+    for event in SpokenAnnouncementEvent.allCases {
+      for speaks in [false, true] {
+        for sound in SpokenAnnouncementAlertSound.allCases {
+          var configuration = SpokenAnnouncementConfiguration.defaults
+          configuration.setSpeaks(speaks, for: event)
+          configuration.setAlertSound(sound, for: event)
+          let enabled = SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
+          XCTAssertEqual(enabled.rule(for: event).isEnabled, speaks || sound != .none, "\(event)")
+          let disabled = SpokenAnnouncementDelivery(isEnabled: false, configuration: configuration)
+          XCTAssertEqual(disabled.rule(for: event), .silent, "\(event)")
+        }
+      }
+    }
+  }
+
+  func testQuietCapacityDefaultsReportOnlyTenPercentAndZeroCrossings() {
+    let delivery = SpokenAnnouncementDelivery(isEnabled: true, configuration: .defaults)
+    for previous in 0...100 {
+      for remaining in 0...100 {
+        let result = UsageAnnouncementPolicy.announcement(
+          previousRemainingPercent: previous,
+          remainingPercent: remaining,
+          delivery: delivery
+        )
+        if previous > 0, remaining == 0 {
+          XCTAssertEqual(result?.event, .usageDepleted)
+          XCTAssertEqual(result?.text, "Codex capacity depleted.")
+          XCTAssertEqual(result?.cue, .attention)
+        } else if previous > 10, remaining <= 10 {
+          XCTAssertEqual(result?.event, .usageTenPercent)
+          XCTAssertEqual(result?.text, "Codex capacity, \(remaining) percent remaining.")
+          XCTAssertEqual(result?.cue, .attention)
+        } else {
+          XCTAssertNil(result, "\(previous) → \(remaining)")
+        }
+      }
+    }
+  }
+
+  func testSkippedCapacityThresholdUsesLowestEnabledCrossingInEverySubset() {
+    let events: [SpokenAnnouncementEvent] = [
+      .usageDepleted, .usageOnePercent, .usageFivePercent, .usageTenPercent, .usageTwentyPercent,
+    ]
+    for mask in 0..<32 {
+      var configuration = SpokenAnnouncementConfiguration.defaults
+      configuration.setAllEventsSpeak(false)
+      configuration.setAllEventsAlertSound(.none)
+      for (index, event) in events.enumerated() where mask & (1 << index) != 0 {
+        configuration.setSpeaks(true, for: event)
+      }
+      let result = UsageAnnouncementPolicy.announcement(
+        previousRemainingPercent: 30,
+        remainingPercent: 0,
+        delivery: SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
+      )
+      XCTAssertEqual(
+        result?.event, events.enumerated().first { mask & (1 << $0.offset) != 0 }?.element)
+      if result != nil { XCTAssertEqual(result?.text, "Codex capacity depleted.") }
+    }
+  }
+
+  func testSoundOnlyCapacityThresholdWinsWithoutSpeakingOrLosingItsCue() {
+    var configuration = SpokenAnnouncementConfiguration.defaults
+    configuration.setAlertSound(.twoPips, for: .usageFivePercent)
+    let result = UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 11,
+      remainingPercent: 4,
+      delivery: SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
+    )
+    XCTAssertEqual(result?.event, .usageFivePercent)
+    XCTAssertEqual(result?.cue, .important)
+  }
+
+  @MainActor
+  func testTenPercentDefaultPlaysOnePipWithActualRemainingValueOnlyOnce() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    let delivery = quietDeliveryWithoutStartup()
+    announcer.updateDelivery(delivery)
+    announcer.observeUsage(remainingPercent: 11, delivery: delivery)
+    announcer.completeHydration(
+      SpokenUpdateStartupSnapshot(knownTaskIDs: [], observedRunningTaskCount: 0)
+    )
+
+    announcer.observeUsage(remainingPercent: 4, delivery: delivery)
+    announcer.observeUsage(remainingPercent: 3, delivery: delivery)
+    announcer.observeUsage(remainingPercent: 3, delivery: delivery)
+
+    XCTAssertEqual(speaker.spokenTexts, ["Codex capacity, 4 percent remaining."])
+    XCTAssertEqual(speaker.spokenCues, [.attention])
+    XCTAssertEqual(speaker.spokenChannels, [.system])
+    XCTAssertTrue(speaker.cueOnlyCues.isEmpty)
+  }
+
+  @MainActor
+  func testQuietDefaultTaskLifecycleKeepsAttentionSoundsWithoutSpeech() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    let delivery = quietDeliveryWithoutStartup()
+    announcer.updateDelivery(delivery)
+    announcer.observe(tasks: [task(state: .working)], delivery: delivery)
+    announcer.completeHydration(
+      SpokenUpdateStartupSnapshot(knownTaskIDs: ["task"], observedRunningTaskCount: 1))
+    for state: CodexTaskActivityState in [
+      .needsInput, .working, .needsApproval, .working, .blocked, .working, .ready,
+    ] {
+      announcer.observe(tasks: [task(state: state)], delivery: delivery)
+    }
+    XCTAssertEqual(speaker.spokenTexts, ["Task complete."])
+    XCTAssertEqual(speaker.spokenCues, [.attention])
+    XCTAssertEqual(speaker.cueOnlyCues, [.important, .important, .important])
+    XCTAssertEqual(speaker.cueOnlyChannels, [.task("task"), .task("task"), .task("task")])
+  }
+
+  @MainActor
+  func testSoundOnlyCustomRulesCoverEveryTaskActivityAndSubagentEvent() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    var configuration = SpokenAnnouncementConfiguration.defaults
+    configuration.setAllEventsSpeak(false)
+    configuration.setAllEventsAlertSound(.twoPips)
+    configuration.setAlertSound(.none, for: .startupSummary)
+    let delivery = SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
+    announcer.updateDelivery(delivery)
+    announcer.observe(tasks: [task(state: .idle)], delivery: delivery)
+    announcer.completeHydration(
+      SpokenUpdateStartupSnapshot(knownTaskIDs: ["task"], observedRunningTaskCount: 0))
+    for state: CodexTaskActivityState in [
+      .working, .ready, .needsInput, .needsApproval, .blocked, .working,
+    ] {
+      announcer.observe(tasks: [task(state: state)], delivery: delivery)
+    }
+    for activity in CodexTaskCurrentActivity.allCases {
+      announcer.observe(
+        tasks: [task(state: .working, currentActivity: activity)], delivery: delivery)
+    }
+    announcer.observe(tasks: [task(state: .working, activeSubagentCount: 1)], delivery: delivery)
+    announcer.observeQueuedFollowUps(
+      taskID: "task", queuedCount: 1, voice: .defaultVoice, delivery: delivery)
+    XCTAssertTrue(speaker.spokenTexts.isEmpty)
+    XCTAssertEqual(speaker.cueOnlyCues, Array(repeating: .important, count: 17))
+    XCTAssertTrue(speaker.cueOnlyChannels.allSatisfy { $0 == .task("task") })
+  }
+
+  @MainActor
+  func testSoundOnlyStartupAndConnectionEventsRespectHydrationAndPairing() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    var configuration = SpokenAnnouncementConfiguration.defaults
+    configuration.setAllEventsSpeak(false)
+    configuration.setAllEventsAlertSound(.onePip)
+    let delivery = SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
+    announcer.updateDelivery(delivery)
+    announcer.observeDesktopAppState(.running, delivery: delivery)
+    announcer.observeMonitoringAvailability(.unavailable)
+    let snapshot = SpokenUpdateStartupSnapshot(knownTaskIDs: [], observedRunningTaskCount: 0)
+    announcer.completeHydration(snapshot)
+    announcer.observeUsage(remainingPercent: 67, delivery: delivery)
+    announcer.observeMonitoringAvailability(.unavailable)
+    announcer.observeIPCConnectionState(.disconnected)
+    announcer.observeMonitoringAvailability(.available)
+    XCTAssertEqual(speaker.cueOnlyChannels, [.startup, .system])
+    announcer.completeHydration(snapshot)
+    announcer.observeDesktopAppState(.notRunning, delivery: delivery)
+    announcer.observeIPCConnectionState(.disconnected)
+    announcer.observeDesktopAppState(.running, delivery: delivery)
+    XCTAssertEqual(speaker.cueOnlyChannels.count, 4)
+    announcer.completeHydration(snapshot)
+    XCTAssertEqual(speaker.cueOnlyChannels, [.startup, .system, .system, .system, .system])
+    XCTAssertTrue(speaker.spokenTexts.isEmpty)
+  }
+
+  @MainActor
+  func testMasterOffSilencesSoundOnlyRulesAndDoesNotReplayPastEvents() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    let enabled = quietDeliveryWithoutStartup()
+    let disabled = SpokenAnnouncementDelivery(
+      isEnabled: false, configuration: enabled.configuration)
+    announcer.updateDelivery(disabled)
+    announcer.observe(tasks: [task(state: .working)], delivery: disabled)
+    announcer.observeUsage(remainingPercent: 11, delivery: disabled)
+    announcer.completeHydration(
+      SpokenUpdateStartupSnapshot(knownTaskIDs: ["task"], observedRunningTaskCount: 1))
+    announcer.observe(tasks: [task(state: .needsApproval)], delivery: disabled)
+    announcer.observeUsage(remainingPercent: 0, delivery: disabled)
+    announcer.updateDelivery(enabled)
+    announcer.observe(tasks: [task(state: .needsApproval)], delivery: enabled)
+    announcer.observeUsage(remainingPercent: 0, delivery: enabled)
+    XCTAssertEqual(speaker.spokenTexts, ["Announcements on."])
+    XCTAssertTrue(speaker.cueOnlyCues.isEmpty)
+  }
+
+  private func quietDeliveryWithoutStartup() -> SpokenAnnouncementDelivery {
+    var configuration = SpokenAnnouncementConfiguration.defaults
+    configuration.setSpeaks(false, for: .startupSummary)
+    configuration.setAlertSound(.none, for: .startupSummary)
+    return SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
+  }
+
   func testQueuedDirectiveCopyUsesConciseOperationsLanguage() {
     XCTAssertEqual(
       SpokenAnnouncementEvent.directiveQueued.announcementText,
@@ -283,7 +499,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testCustomConfigurationSuppressesOnlyItsDisabledAnnouncement() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setSpeaks(false, for: .taskCompleted)
     configuration.setSpeaks(false, for: .startupSummary)
     let delivery = SpokenAnnouncementDelivery(
@@ -318,7 +534,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testEventPreviewIgnoresSpeakChoiceButUsesItsAlertSoundChoice() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setSpeaks(false, for: .approvalRequired)
     configuration.setAlertSound(.twoPips, for: .approvalRequired)
 
@@ -341,7 +557,7 @@ final class SpokenUpdateTests: XCTestCase {
 
     announcer.preview(
       .taskResponseGeneration,
-      configuration: .defaults
+      configuration: allEventsConfiguration()
     )
 
     XCTAssertEqual(speaker.stoppedChannels, [.preview])
@@ -362,7 +578,7 @@ final class SpokenUpdateTests: XCTestCase {
 
     announcer.preview(
       .taskCompleted,
-      configuration: .defaults
+      configuration: allEventsConfiguration()
     )
 
     XCTAssertEqual(speaker.spokenVoices, [configuredVoice])
@@ -372,7 +588,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testStartupPreviewIncludesOnlyItsSelectedInformation() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setIncludesStartupInformation(
       false,
       information: .activeTasks
@@ -775,7 +991,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testStartupCapacityInformationCanBeDisabledWithoutDisablingFutureUsageChanges() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setIncludesStartupInformation(
       false,
       information: .codexCapacity
@@ -809,7 +1025,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testDisablingStartupAnnouncementSuppressesItsSelectedInformation() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setSpeaks(false, for: .startupSummary)
     let delivery = SpokenAnnouncementDelivery(
       isEnabled: true,
@@ -837,7 +1053,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testStartupCanIncludeCapacityWithoutActiveTaskCount() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setIncludesStartupInformation(
       false,
       information: .activeTasks
@@ -921,7 +1137,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testDeferredStartupInformationHonorsInformationDisabledBeforeCapacityArrives() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     let initialDelivery = SpokenAnnouncementDelivery(
       isEnabled: true,
       configuration: configuration
@@ -962,7 +1178,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testDeferredStartupInformationDoesNotAddInformationEnabledAfterHydration() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setIncludesStartupInformation(
       false,
       information: .activeTasks
@@ -1009,7 +1225,7 @@ final class SpokenUpdateTests: XCTestCase {
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
     let delivery = SpokenAnnouncementDelivery(
       isEnabled: true,
-      configuration: .defaults
+      configuration: allEventsConfiguration()
     )
     announcer.updateDelivery(delivery)
     announcer.completeHydration(
@@ -1048,7 +1264,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testEnablingStartupAfterHydrationDoesNotReplayTheStartupAnnouncement() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setSpeaks(false, for: .startupSummary)
     let disabledStartupDelivery = SpokenAnnouncementDelivery(
       isEnabled: true,
@@ -1081,7 +1297,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testEnablingStartupCapacityAfterHydrationDoesNotAmendPastStartup() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     configuration.setIncludesStartupInformation(
       false,
       information: .codexCapacity
@@ -1120,7 +1336,7 @@ final class SpokenUpdateTests: XCTestCase {
   func testPendingStartupCapacityDoesNotReviveAfterItIsDisabled() {
     let speaker = SpokenUpdateSpeakerSpy()
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
-    var configuration = SpokenAnnouncementConfiguration.defaults
+    var configuration = allEventsConfiguration()
     let enabledDelivery = SpokenAnnouncementDelivery(
       isEnabled: true,
       configuration: configuration
@@ -1217,9 +1433,9 @@ final class SpokenUpdateTests: XCTestCase {
     let announcer = SpokenUpdateAnnouncer(speaker: speaker)
     let initialDelivery = SpokenAnnouncementDelivery(
       isEnabled: true,
-      configuration: .defaults
+      configuration: allEventsConfiguration()
     )
-    var editedConfiguration = SpokenAnnouncementConfiguration.defaults
+    var editedConfiguration = allEventsConfiguration()
     editedConfiguration.setAlertSound(.twoPips, for: .usageTwentyPercent)
 
     announcer.updateDelivery(initialDelivery)
@@ -1251,13 +1467,13 @@ final class SpokenUpdateTests: XCTestCase {
     announcer.updateDelivery(
       SpokenAnnouncementDelivery(
         isEnabled: true,
-        configuration: .defaults
+        configuration: allEventsConfiguration()
       )
     )
     announcer.updateDelivery(
       SpokenAnnouncementDelivery(
         isEnabled: false,
-        configuration: .defaults
+        configuration: allEventsConfiguration()
       )
     )
 
@@ -1273,13 +1489,13 @@ final class SpokenUpdateTests: XCTestCase {
     announcer.updateDelivery(
       SpokenAnnouncementDelivery(
         isEnabled: false,
-        configuration: .defaults
+        configuration: allEventsConfiguration()
       )
     )
     announcer.updateDelivery(
       SpokenAnnouncementDelivery(
         isEnabled: true,
-        configuration: .defaults
+        configuration: allEventsConfiguration()
       )
     )
 
@@ -1300,7 +1516,7 @@ final class SpokenUpdateTests: XCTestCase {
     announcer.updateDelivery(
       SpokenAnnouncementDelivery(
         isEnabled: true,
-        configuration: .defaults
+        configuration: allEventsConfiguration()
       )
     )
 
@@ -2429,7 +2645,7 @@ final class SpokenUpdateTests: XCTestCase {
           taskID: "task",
           event: .subagentBecameActive,
           text: "Sub-agent active."
-        )
+        ),
       ]
     )
   }
@@ -2675,6 +2891,8 @@ private final class SpokenUpdateSpeakerSpy: SpokenUpdateSpeaking {
   private(set) var spokenChannels: [SpokenUpdateChannel] = []
   private(set) var spokenVoices: [SpokenUpdateVoice] = []
   private(set) var spokenCues: [SpokenUpdateCue] = []
+  private(set) var cueOnlyCues: [SpokenUpdateCue] = []
+  private(set) var cueOnlyChannels: [SpokenUpdateChannel] = []
   private(set) var stoppedChannels: [SpokenUpdateChannel] = []
   private(set) var stopAllCallCount = 0
 
@@ -2692,6 +2910,11 @@ private final class SpokenUpdateSpeakerSpy: SpokenUpdateSpeaking {
 
   func stop(_ channel: SpokenUpdateChannel) {
     stoppedChannels.append(channel)
+  }
+
+  func playCue(_ cue: SpokenUpdateCue, channel: SpokenUpdateChannel) {
+    cueOnlyCues.append(cue)
+    cueOnlyChannels.append(channel)
   }
 
   func stopAll() {
