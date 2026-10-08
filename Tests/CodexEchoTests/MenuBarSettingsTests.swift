@@ -4,8 +4,8 @@ import ServiceManagement
 import SwiftUI
 import XCTest
 
-@testable import CodexIPC
 @testable import CodexEcho
+@testable import CodexIPC
 
 final class MenuBarSettingsTests: XCTestCase {
   func testAppPresentationCopyUsesTheCodexEchoBrand() {
@@ -34,7 +34,15 @@ final class MenuBarSettingsTests: XCTestCase {
     )
     XCTAssertEqual(
       MenuBarSettingsCopy.speakAnnouncementsDescription,
-      "Speaks the announcement and alert sound choices below."
+      "Plays the speech and alert sounds configured below."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.customizeAnnouncementsDescription,
+      "Changes are saved automatically. Speak and Alert Sound are independent; Speak announcements turns both on or off."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.announcementAlertSoundHelp,
+      "Play a short alert sound, even when Speak is off."
     )
   }
 
@@ -719,15 +727,31 @@ final class MenuBarSettingsTests: XCTestCase {
     }
   }
 
-  func testDefaultAnnouncementConfigurationSpeaksEveryEventWithExpectedAlerts() {
+  func testDefaultAnnouncementConfigurationKeepsOnlyEssentialNotifications() {
     let configuration = SpokenAnnouncementConfiguration.defaults
+    let spokenEvents: Set<SpokenAnnouncementEvent> = [
+      .startupSummary, .taskCompleted, .usageTenPercent, .usageDepleted,
+    ]
+    let alertSounds: [SpokenAnnouncementEvent: SpokenAnnouncementAlertSound] = [
+      .startupSummary: .onePip,
+      .taskCompleted: .onePip,
+      .inputRequired: .twoPips,
+      .approvalRequired: .twoPips,
+      .taskError: .twoPips,
+      .usageTenPercent: .onePip,
+      .usageDepleted: .onePip,
+    ]
 
-    XCTAssertEqual(configuration.allEventsSpeakState, .allOn)
+    XCTAssertEqual(SpokenAnnouncementEvent.allCases.count, 29)
+    XCTAssertEqual(configuration.allEventsSpeakState, .mixed)
     XCTAssertNil(configuration.allEventsAlertSound)
     for event in SpokenAnnouncementEvent.allCases {
       XCTAssertEqual(
         configuration.rule(for: event),
-        event.definition.defaultRule,
+        SpokenAnnouncementRule(
+          speaks: spokenEvents.contains(event),
+          alertSound: alertSounds[event] ?? .none
+        ),
         "\(event)"
       )
     }
@@ -741,11 +765,11 @@ final class MenuBarSettingsTests: XCTestCase {
     )
     XCTAssertEqual(
       configuration.rule(for: .usageFivePercent).alertSound,
-      .onePip
+      .none
     )
     XCTAssertEqual(
       configuration.rule(for: .usageOnePercent).alertSound,
-      .onePip
+      .none
     )
     XCTAssertEqual(
       configuration.rule(for: .usageDepleted).alertSound,
@@ -753,15 +777,15 @@ final class MenuBarSettingsTests: XCTestCase {
     )
     XCTAssertEqual(
       configuration.rule(for: .applicationOffline).alertSound,
-      .onePip
+      .none
     )
     XCTAssertEqual(
       configuration.rule(for: .applicationOnline).alertSound,
-      .onePip
+      .none
     )
     XCTAssertEqual(
       configuration.rule(for: .monitoringInterrupted).alertSound,
-      .onePip
+      .none
     )
     XCTAssertEqual(
       configuration.rule(for: .monitoringRestored).alertSound,
@@ -888,6 +912,24 @@ final class MenuBarSettingsTests: XCTestCase {
   }
 
   @MainActor
+  func testSavedAllEventChoicesAreNotReplacedByQuieterDefaults() throws {
+    var configuration = SpokenAnnouncementConfiguration.defaults
+    configuration.setAllEventsSpeak(true)
+    configuration.setAllEventsAlertSound(.twoPips)
+    configuration.setSpeaks(false, for: .inputRequired)
+    configuration.setIncludesStartupInformation(false, information: .codexCapacity)
+    let data = try JSONEncoder().encode(configuration)
+    withSettingsDefaults { defaults in
+      defaults.set(true, forKey: "speaksAnnouncements")
+      defaults.set(data, forKey: "spokenAnnouncementConfiguration")
+      let settings = MenuBarSettings(userDefaults: defaults)
+      XCTAssertTrue(settings.speaksAnnouncements)
+      XCTAssertEqual(settings.spokenAnnouncementConfiguration, configuration)
+      XCTAssertEqual(defaults.data(forKey: "spokenAnnouncementConfiguration"), data)
+    }
+  }
+
+  @MainActor
   func testIncompatibleAnnouncementConfigurationFallsBackToDefaults() {
     withSettingsDefaults { defaults in
       defaults.set(
@@ -897,7 +939,7 @@ final class MenuBarSettingsTests: XCTestCase {
 
       let settings = MenuBarSettings(userDefaults: defaults)
 
-      XCTAssertEqual(settings.allEventsSpeakState, .allOn)
+      XCTAssertEqual(settings.allEventsSpeakState, .mixed)
       XCTAssertTrue(settings.startupAnnouncementIncludes(.activeTasks))
       XCTAssertTrue(settings.startupAnnouncementIncludes(.codexCapacity))
       XCTAssertEqual(
@@ -933,8 +975,8 @@ final class MenuBarSettingsTests: XCTestCase {
 
       let settings = MenuBarSettings(userDefaults: defaults)
 
-      XCTAssertEqual(settings.allEventsSpeakState, .allOn)
-      XCTAssertTrue(
+      XCTAssertEqual(settings.allEventsSpeakState, .mixed)
+      XCTAssertFalse(
         settings.spokenAnnouncementRule(for: .applicationOnline).speaks
       )
       XCTAssertNil(
@@ -969,7 +1011,7 @@ final class MenuBarSettingsTests: XCTestCase {
 
       let settings = MenuBarSettings(userDefaults: defaults)
 
-      XCTAssertEqual(settings.allEventsSpeakState, .allOn)
+      XCTAssertEqual(settings.allEventsSpeakState, .mixed)
       XCTAssertTrue(settings.startupAnnouncementIncludes(.activeTasks))
       XCTAssertTrue(settings.startupAnnouncementIncludes(.codexCapacity))
       XCTAssertNil(
@@ -1045,7 +1087,7 @@ final class MenuBarSettingsTests: XCTestCase {
   }
 
   @MainActor
-  func testRestoreDefaultsKeepsTheMasterSwitchAndRestoresAllActivity() {
+  func testRestoreDefaultsKeepsTheMasterSwitchAndRestoresEssentialNotifications() {
     withSettings { settings, _ in
       settings.speaksAnnouncements = true
       settings.setSpokenAnnouncementSpeaks(false, for: .taskCompleted)
@@ -1063,7 +1105,7 @@ final class MenuBarSettingsTests: XCTestCase {
         settings.spokenAnnouncementRule(for: .taskCompleted).alertSound,
         .onePip
       )
-      XCTAssertTrue(
+      XCTAssertFalse(
         settings.spokenAnnouncementRule(for: .taskAnalysis).speaks
       )
       XCTAssertEqual(
@@ -1084,7 +1126,7 @@ final class MenuBarSettingsTests: XCTestCase {
       XCTAssertEqual(settings.defaultSpokenUpdateVoice, .defaultVoice)
       XCTAssertTrue(settings.showsCapacityInMenuBar)
       XCTAssertTrue(settings.recordsCapacityHistory)
-      XCTAssertTrue(
+      XCTAssertFalse(
         settings.spokenAnnouncementRule(for: .taskAnalysis).speaks
       )
     }
@@ -1146,7 +1188,7 @@ final class MenuBarSettingsTests: XCTestCase {
       let settings = MenuBarSettings(userDefaults: defaults)
 
       XCTAssertFalse(settings.speaksAnnouncements)
-      XCTAssertEqual(settings.allEventsSpeakState, .allOn)
+      XCTAssertEqual(settings.allEventsSpeakState, .mixed)
       XCTAssertNil(defaults.object(forKey: "speaksAnnouncements"))
     }
   }

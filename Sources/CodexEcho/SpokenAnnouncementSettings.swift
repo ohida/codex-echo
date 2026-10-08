@@ -24,24 +24,27 @@ enum SpokenAnnouncementCategory: String, CaseIterable, Identifiable {
 struct SpokenAnnouncementDefinition: Equatable {
   let category: SpokenAnnouncementCategory
   let announcementText: String
+  let defaultSpeaks: Bool
   let defaultAlertSound: SpokenAnnouncementAlertSound
   let sourceStateAliases: [String]
 
   init(
     category: SpokenAnnouncementCategory,
     announcementText: String,
+    defaultSpeaks: Bool = false,
     defaultAlertSound: SpokenAnnouncementAlertSound,
     sourceStateAliases: [String] = []
   ) {
     self.category = category
     self.announcementText = announcementText
+    self.defaultSpeaks = defaultSpeaks
     self.defaultAlertSound = defaultAlertSound
     self.sourceStateAliases = sourceStateAliases
   }
 
   var defaultRule: SpokenAnnouncementRule {
     SpokenAnnouncementRule(
-      speaks: true,
+      speaks: defaultSpeaks,
       alertSound: defaultAlertSound
     )
   }
@@ -133,6 +136,7 @@ enum SpokenAnnouncementEvent: String, CaseIterable, Codable, Identifiable {
       SpokenAnnouncementDefinition(
         category: .startup,
         announcementText: AppPresentationCopy.startupAnnouncement,
+        defaultSpeaks: true,
         defaultAlertSound: .onePip
       )
     case .taskStarted:
@@ -145,6 +149,7 @@ enum SpokenAnnouncementEvent: String, CaseIterable, Codable, Identifiable {
       SpokenAnnouncementDefinition(
         category: .task,
         announcementText: "Task complete.",
+        defaultSpeaks: true,
         defaultAlertSound: .onePip,
         sourceStateAliases: ["Ready"]
       )
@@ -218,24 +223,26 @@ enum SpokenAnnouncementEvent: String, CaseIterable, Codable, Identifiable {
       SpokenAnnouncementDefinition(
         category: .capacity,
         announcementText: "Codex capacity, 10 percent remaining.",
-        defaultAlertSound: .none
+        defaultSpeaks: true,
+        defaultAlertSound: .onePip
       )
     case .usageFivePercent:
       SpokenAnnouncementDefinition(
         category: .capacity,
         announcementText: "Codex capacity, 5 percent remaining.",
-        defaultAlertSound: .onePip
+        defaultAlertSound: .none
       )
     case .usageOnePercent:
       SpokenAnnouncementDefinition(
         category: .capacity,
         announcementText: "Codex capacity, 1 percent remaining.",
-        defaultAlertSound: .onePip
+        defaultAlertSound: .none
       )
     case .usageDepleted:
       SpokenAnnouncementDefinition(
         category: .capacity,
         announcementText: "Codex capacity depleted.",
+        defaultSpeaks: true,
         defaultAlertSound: .onePip
       )
     case .usageIncreased:
@@ -254,7 +261,7 @@ enum SpokenAnnouncementEvent: String, CaseIterable, Codable, Identifiable {
       SpokenAnnouncementDefinition(
         category: .connection,
         announcementText: "Codex monitoring interrupted.",
-        defaultAlertSound: .onePip
+        defaultAlertSound: .none
       )
     case .monitoringRestored:
       SpokenAnnouncementDefinition(
@@ -266,13 +273,13 @@ enum SpokenAnnouncementEvent: String, CaseIterable, Codable, Identifiable {
       SpokenAnnouncementDefinition(
         category: .connection,
         announcementText: "Codex application offline.",
-        defaultAlertSound: .onePip
+        defaultAlertSound: .none
       )
     case .applicationOnline:
       SpokenAnnouncementDefinition(
         category: .connection,
         announcementText: "Codex application online.",
-        defaultAlertSound: .onePip
+        defaultAlertSound: .none
       )
     }
   }
@@ -432,6 +439,10 @@ enum SpokenAnnouncementAlertSound: String, CaseIterable, Codable, Identifiable {
 struct SpokenAnnouncementRule: Codable, Equatable {
   var speaks: Bool
   var alertSound: SpokenAnnouncementAlertSound
+
+  var isEnabled: Bool {
+    speaks || alertSound != .none
+  }
 
   static let silent = SpokenAnnouncementRule(
     speaks: false,

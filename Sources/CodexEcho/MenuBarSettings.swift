@@ -66,7 +66,11 @@ enum MenuBarSettingsCopy {
   static let speakAnnouncementsMenuTitle = "Speak Announcements"
   static let speakAnnouncementsSettingsTitle = "Speak announcements"
   static let speakAnnouncementsDescription =
-    "Speaks the announcement and alert sound choices below."
+    "Plays the speech and alert sounds configured below."
+  static let customizeAnnouncementsDescription =
+    "Changes are saved automatically. Speak and Alert Sound are independent; Speak announcements turns both on or off."
+  static let announcementAlertSoundHelp =
+    "Play a short alert sound, even when Speak is off."
 
   static func softwareUpdateDescription(
     displayVersion: String,
@@ -952,7 +956,7 @@ struct SpokenAnnouncementSettingsView: View {
         }
 
         Text(
-          "Changes are saved automatically. Use Speak announcements to turn the configured set on or off."
+          MenuBarSettingsCopy.customizeAnnouncementsDescription
         )
         .foregroundStyle(.secondary)
       }
@@ -1162,7 +1166,7 @@ struct SpokenAnnouncementSettingsView: View {
       .accessibilityLabel(
         "Alert sound for \(event.settingsText) announcements"
       )
-      .help("Play a short alert sound before this announcement.")
+      .help(MenuBarSettingsCopy.announcementAlertSoundHelp)
 
       Button {
         previewSpokenAnnouncement(event)

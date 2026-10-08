@@ -1,6 +1,6 @@
 @preconcurrency import AVFoundation
-import Combine
 import CodexIPC
+import Combine
 import Foundation
 
 enum SpokenUpdateCue: Equatable {
@@ -278,55 +278,42 @@ enum UsageAnnouncementPolicy {
       min(max($0, 0), 100)
     }
     guard clampedPreviousPercent != remainingPercent else { return nil }
-    let event = event(
-      previousRemainingPercent: clampedPreviousPercent,
-      remainingPercent: remainingPercent
-    )
+    guard
+      let event = events(
+        previousRemainingPercent: clampedPreviousPercent,
+        remainingPercent: remainingPercent
+      ).first(where: { delivery.rule(for: $0).isEnabled })
+    else { return nil }
     let rule = delivery.rule(for: event)
-    guard rule.speaks else { return nil }
     return SpokenUpdateAnnouncement(
       event: event,
       text: event == .usageIncreased
         ? "Codex capacity increased to \(remainingPercent) percent."
-        : SpokenUpdateCopy.startupCapacity(
-          remainingPercent: remainingPercent
-        ),
+        : SpokenUpdateCopy.startupCapacity(remainingPercent: remainingPercent),
       cue: rule.alertSound.cue
     )
   }
 
-  private static func event(
+  private static func events(
     previousRemainingPercent: Int?,
     remainingPercent: Int
-  ) -> SpokenAnnouncementEvent {
-    guard let previousRemainingPercent else {
-      switch remainingPercent {
-      case 0: return .usageDepleted
-      case 1: return .usageOnePercent
-      case 2...5: return .usageFivePercent
-      case 6...10: return .usageTenPercent
-      default: return .usageChanged
-      }
+  ) -> [SpokenAnnouncementEvent] {
+    if let previousRemainingPercent,
+      remainingPercent > previousRemainingPercent
+    {
+      return [.usageIncreased]
     }
-    if remainingPercent > previousRemainingPercent {
-      return .usageIncreased
+    let thresholds: [(Int, SpokenAnnouncementEvent)] = [
+      (0, .usageDepleted), (1, .usageOnePercent), (5, .usageFivePercent),
+      (10, .usageTenPercent), (20, .usageTwentyPercent),
+    ]
+    let crossedEvents = thresholds.compactMap { threshold, event in
+      guard remainingPercent <= threshold,
+        previousRemainingPercent.map({ $0 > threshold }) ?? (threshold <= 10)
+      else { return nil as SpokenAnnouncementEvent? }
+      return event
     }
-    if remainingPercent == 0 && previousRemainingPercent > 0 {
-      return .usageDepleted
-    }
-    if previousRemainingPercent > 1 && remainingPercent <= 1 {
-      return .usageOnePercent
-    }
-    if previousRemainingPercent > 5 && remainingPercent <= 5 {
-      return .usageFivePercent
-    }
-    if previousRemainingPercent > 10 && remainingPercent <= 10 {
-      return .usageTenPercent
-    }
-    if previousRemainingPercent > 20 && remainingPercent <= 20 {
-      return .usageTwentyPercent
-    }
-    return .usageChanged
+    return crossedEvents + [.usageChanged]
   }
 }
 
@@ -524,6 +511,7 @@ protocol SpokenUpdateSpeaking: AnyObject {
     voice: SpokenUpdateVoice,
     cue: SpokenUpdateCue
   )
+  func playCue(_ cue: SpokenUpdateCue, channel: SpokenUpdateChannel)
   func stop(_ channel: SpokenUpdateChannel)
   func stopAll()
 }
@@ -607,13 +595,26 @@ final class SpokenUpdateAnnouncer {
     guard liveUpdatesAreArmed else { return }
     for update in updates {
       let rule = delivery.rule(for: update.event)
-      guard rule.speaks, shouldAnnounce(update) else { continue }
-      speaker.speak(
+      guard rule.isEnabled, shouldAnnounce(update) else { continue }
+      announce(
         update.text,
         channel: .task(update.taskID),
         voice: update.voice,
-        cue: rule.alertSound.cue
+        rule: rule
       )
+    }
+  }
+
+  private func announce(
+    _ text: String,
+    channel: SpokenUpdateChannel,
+    voice: SpokenUpdateVoice,
+    rule: SpokenAnnouncementRule
+  ) {
+    if rule.speaks {
+      speaker.speak(text, channel: channel, voice: voice, cue: rule.alertSound.cue)
+    } else if rule.alertSound != .none {
+      speaker.playCue(rule.alertSound.cue, channel: channel)
     }
   }
 
@@ -718,15 +719,15 @@ final class SpokenUpdateAnnouncer {
     queuedFollowUpCountsByTaskID[taskID] = queuedCount
     let rule = delivery.rule(for: .directiveQueued)
     guard liveUpdatesAreArmed,
-      rule.speaks,
+      rule.isEnabled,
       queuedCount > previousCount
     else { return }
 
-    speaker.speak(
+    announce(
       SpokenAnnouncementEvent.directiveQueued.announcementText,
       channel: .task(taskID),
       voice: voice,
-      cue: rule.alertSound.cue
+      rule: rule
     )
   }
 
@@ -749,11 +750,11 @@ final class SpokenUpdateAnnouncer {
         delivery: delivery
       )
     else { return }
-    speaker.speak(
+    announce(
       announcement.text,
       channel: .system,
       voice: defaultVoice,
-      cue: announcement.cue
+      rule: delivery.rule(for: announcement.event)
     )
   }
 
@@ -774,19 +775,19 @@ final class SpokenUpdateAnnouncer {
     {
       desktopApplicationWasObservedOffline = false
       desktopApplicationRestorationIsPending =
-        delivery.rule(for: .applicationOnline).speaks
+        delivery.rule(for: .applicationOnline).isEnabled
     }
     let rule = delivery.rule(for: .applicationOffline)
-    guard rule.speaks,
+    guard rule.isEnabled,
       previousState == .running,
       state != .running
     else { return }
 
-    speaker.speak(
+    announce(
       SpokenAnnouncementEvent.applicationOffline.announcementText,
       channel: .system,
       voice: defaultVoice,
-      cue: rule.alertSound.cue
+      rule: rule
     )
   }
 
@@ -804,13 +805,13 @@ final class SpokenUpdateAnnouncer {
         let currentDelivery
       else { return }
       let rule = currentDelivery.rule(for: .monitoringInterrupted)
-      guard rule.speaks else { return }
+      guard rule.isEnabled else { return }
       monitoringInterruptionWasAnnounced = true
-      speaker.speak(
+      announce(
         SpokenAnnouncementEvent.monitoringInterrupted.announcementText,
         channel: .system,
         voice: defaultVoice,
-        cue: rule.alertSound.cue
+        rule: rule
       )
     case .available:
       guard monitoringInterruptionWasAnnounced else {
@@ -831,22 +832,24 @@ final class SpokenUpdateAnnouncer {
     if !completedInitialHydration {
       if !deliveryChangedSinceLaunch,
         let currentDelivery,
-        currentDelivery.rule(for: .startupSummary).speaks
+        currentDelivery.rule(for: .startupSummary).isEnabled
       {
         let defersStartupInformation =
-          previousRemainingUsagePercent == nil
+          currentDelivery.rule(for: .startupSummary).speaks
+          && previousRemainingUsagePercent == nil
           && currentDelivery.configuration.includesStartupInformation(
             .codexCapacity
           )
         let startupInformation =
           currentDelivery.configuration.startupInformation
-        pendingStartupInformation = defersStartupInformation
+        pendingStartupInformation =
+          defersStartupInformation
           ? PendingStartupInformation(
             snapshot: startupSnapshot,
             information: startupInformation
           )
           : nil
-        speaker.speak(
+        announce(
           SpokenUpdateCopy.startupStatus(
             observedRunningTaskCount:
               startupSnapshot.observedRunningTaskCount,
@@ -855,7 +858,7 @@ final class SpokenUpdateAnnouncer {
           ),
           channel: .startup,
           voice: defaultVoice,
-          cue: currentDelivery.rule(for: .startupSummary).alertSound.cue
+          rule: currentDelivery.rule(for: .startupSummary)
         )
       }
       completedInitialHydration = true
@@ -923,12 +926,12 @@ final class SpokenUpdateAnnouncer {
       return
     }
     let rule = currentDelivery?.rule(for: .monitoringRestored) ?? .silent
-    if rule.speaks {
-      speaker.speak(
+    if rule.isEnabled {
+      announce(
         SpokenAnnouncementEvent.monitoringRestored.announcementText,
         channel: .system,
         voice: defaultVoice,
-        cue: rule.alertSound.cue
+        rule: rule
       )
     }
     monitoringInterruptionWasAnnounced = false
@@ -939,12 +942,12 @@ final class SpokenUpdateAnnouncer {
     guard desktopApplicationRestorationIsPending else { return }
     desktopApplicationRestorationIsPending = false
     let rule = currentDelivery?.rule(for: .applicationOnline) ?? .silent
-    guard rule.speaks else { return }
-    speaker.speak(
+    guard rule.isEnabled else { return }
+    announce(
       SpokenAnnouncementEvent.applicationOnline.announcementText,
       channel: .system,
       voice: defaultVoice,
-      cue: rule.alertSound.cue
+      rule: rule
     )
   }
 
