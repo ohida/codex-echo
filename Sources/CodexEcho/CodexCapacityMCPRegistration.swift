@@ -290,8 +290,22 @@ final class SystemCodexCapacityMCPCommandRunner: CodexCapacityMCPCommandRunning,
 @MainActor
 protocol CodexCapacityMCPRegistrationServicing {
   func inspect() async -> CodexCapacityMCPRegistrationInspection
-  func setUp() async -> CodexCapacityMCPRegistrationInspection
-  func remove() async -> CodexCapacityMCPRegistrationInspection
+  func setUp(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection
+  func remove(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection
+}
+
+extension CodexCapacityMCPRegistrationServicing {
+  func setUp() async -> CodexCapacityMCPRegistrationInspection {
+    await setUp(onMutationStarting: {})
+  }
+
+  func remove() async -> CodexCapacityMCPRegistrationInspection {
+    await remove(onMutationStarting: {})
+  }
 }
 
 @MainActor
@@ -324,6 +338,7 @@ final class CodexCapacityMCPRegistrationService:
   private let codexExecutableURL: () -> URL?
   private let echoExecutableURL: () -> URL?
   private let echoBundleURL: () -> URL
+  private let userApplicationsURL: () -> URL
   private let applicationSupportURL: () -> URL
   private let fileManager: FileManager
 
@@ -333,6 +348,10 @@ final class CodexCapacityMCPRegistrationService:
     codexExecutableURL: @escaping () -> URL?,
     echoExecutableURL: @escaping () -> URL?,
     echoBundleURL: @escaping () -> URL,
+    userApplicationsURL: @escaping () -> URL = {
+      FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Applications", isDirectory: true)
+    },
     applicationSupportURL: @escaping () -> URL,
     fileManager: FileManager = .default
   ) {
@@ -340,20 +359,30 @@ final class CodexCapacityMCPRegistrationService:
     self.codexExecutableURL = codexExecutableURL
     self.echoExecutableURL = echoExecutableURL
     self.echoBundleURL = echoBundleURL
+    self.userApplicationsURL = userApplicationsURL
     self.applicationSupportURL = applicationSupportURL
     self.fileManager = fileManager
   }
 
   func inspect() async -> CodexCapacityMCPRegistrationInspection {
-    guard Self.isSupportedInstallation(bundleURL: echoBundleURL()) else {
+    guard let context = resolveContext() else { return .checkFailed }
+    let result = await listRegistration(in: context)
+    if case .missing = result,
+      !Self.isSupportedInstallation(
+        bundleURL: echoBundleURL(), userApplicationsURL: userApplicationsURL()
+      )
+    {
       return .unsupportedInstallation
     }
-    guard let context = resolveContext() else { return .checkFailed }
-    return inspection(from: await listRegistration(in: context))
+    return inspection(from: result)
   }
 
-  func setUp() async -> CodexCapacityMCPRegistrationInspection {
-    guard Self.isSupportedInstallation(bundleURL: echoBundleURL()) else {
+  func setUp(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection {
+    guard Self.isSupportedInstallation(
+      bundleURL: echoBundleURL(), userApplicationsURL: userApplicationsURL()
+    ) else {
       return .unsupportedInstallation
     }
     guard let context = resolveContext() else { return .checkFailed }
@@ -370,6 +399,7 @@ final class CodexCapacityMCPRegistrationService:
     }
 
     guard !Task.isCancelled else { return .checkFailed }
+    onMutationStarting()
 
     _ = await commandRunner.run(
       executableURL: context.codexExecutableURL,
@@ -384,10 +414,9 @@ final class CodexCapacityMCPRegistrationService:
     return inspection(from: await listRegistration(in: context))
   }
 
-  func remove() async -> CodexCapacityMCPRegistrationInspection {
-    guard Self.isSupportedInstallation(bundleURL: echoBundleURL()) else {
-      return .unsupportedInstallation
-    }
+  func remove(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection {
     guard let context = resolveContext() else { return .checkFailed }
 
     switch await listRegistration(in: context) {
@@ -402,6 +431,7 @@ final class CodexCapacityMCPRegistrationService:
     }
 
     guard !Task.isCancelled else { return .checkFailed }
+    onMutationStarting()
 
     _ = await commandRunner.run(
       executableURL: context.codexExecutableURL,
@@ -420,12 +450,18 @@ final class CodexCapacityMCPRegistrationService:
     }
   }
 
-  static func isSupportedInstallation(bundleURL: URL) -> Bool {
+  static func isSupportedInstallation(
+    bundleURL: URL,
+    userApplicationsURL: URL = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Applications", isDirectory: true)
+  ) -> Bool {
     let canonicalPath = bundleURL.standardizedFileURL
       .resolvingSymlinksInPath().path
+    let userApplicationsPath = userApplicationsURL.standardizedFileURL.path
     return bundleURL.pathExtension.lowercased() == "app"
-      && !canonicalPath.contains("/AppTranslocation/")
-      && !canonicalPath.hasPrefix("/Volumes/")
+      && URL(fileURLWithPath: canonicalPath).pathExtension.lowercased() == "app"
+      && (canonicalPath.hasPrefix("/Applications/")
+        || canonicalPath.hasPrefix(userApplicationsPath + "/"))
   }
 
   private struct Context {
@@ -435,9 +471,7 @@ final class CodexCapacityMCPRegistrationService:
   }
 
   private func resolveContext() -> Context? {
-    let bundleURL = echoBundleURL()
-    guard Self.isSupportedInstallation(bundleURL: bundleURL),
-      let codexExecutableURL = codexExecutableURL(),
+    guard let codexExecutableURL = codexExecutableURL(),
       fileManager.isExecutableFile(atPath: codexExecutableURL.path),
       let echoExecutableURL = echoExecutableURL(),
       fileManager.isExecutableFile(atPath: echoExecutableURL.path)
@@ -513,6 +547,7 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
   private let service: (any CodexCapacityMCPRegistrationServicing)?
   private var task: Task<Void, Never>?
   private var isCapacityPaneVisible = false
+  private var mutationIsRunning = false
   private var generation: UInt64 = 0
 
   init(service: any CodexCapacityMCPRegistrationServicing) {
@@ -532,8 +567,8 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
     guard isCapacityPaneVisible != isVisible else { return }
     isCapacityPaneVisible = isVisible
     if isVisible {
-      refresh()
-    } else {
+      if !mutationIsRunning { refresh() }
+    } else if !mutationIsRunning {
       generation &+= 1
       task?.cancel()
       task = nil
@@ -553,8 +588,8 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
       status == .notConfigured || status == .removed,
       let service
     else { return }
-    start(status: .settingUp) { [service] in
-      await service.setUp()
+    start(status: .settingUp) { [service] onMutationStarting in
+      await service.setUp(onMutationStarting: onMutationStarting)
     }
   }
 
@@ -562,8 +597,9 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
     guard isCapacityPaneVisible, status == .configured,
       let service
     else { return }
-    start(status: .removing, checkFailureStatus: .removeFailed) { [service] in
-      await service.remove()
+    start(status: .removing, checkFailureStatus: .removeFailed) {
+      [service] onMutationStarting in
+      await service.remove(onMutationStarting: onMutationStarting)
     }
   }
 
@@ -571,8 +607,9 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
     guard isCapacityPaneVisible, status == .removeFailed,
       let service
     else { return }
-    start(status: .removing, checkFailureStatus: .removeFailed) { [service] in
-      await service.remove()
+    start(status: .removing, checkFailureStatus: .removeFailed) {
+      [service] onMutationStarting in
+      await service.remove(onMutationStarting: onMutationStarting)
     }
   }
 
@@ -582,8 +619,8 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
   }
 
   private func refresh() {
-    guard let service else { return }
-    start(status: .checking) { [service] in
+    guard let service, !mutationIsRunning else { return }
+    start(status: .checking) { [service] _ in
       await service.inspect()
     }
   }
@@ -591,18 +628,26 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
   private func start(
     status pendingStatus: CodexCapacityMCPRegistrationStatus,
     checkFailureStatus: CodexCapacityMCPRegistrationStatus = .checkFailed,
-    operation: @escaping () async -> CodexCapacityMCPRegistrationInspection
+    operation: @escaping (
+      @escaping @MainActor () -> Void
+    ) async -> CodexCapacityMCPRegistrationInspection
   ) {
+    guard !mutationIsRunning else { return }
     generation &+= 1
     let operationGeneration = generation
     task?.cancel()
     status = pendingStatus
     task = Task { [weak self] in
-      let inspection = await operation()
+      let inspection = await operation { [weak self] in
+        guard let self, self.generation == operationGeneration else { return }
+        self.mutationIsRunning = true
+      }
+      guard let self, self.generation == operationGeneration else { return }
+      let completedMutation = self.mutationIsRunning
+      self.mutationIsRunning = false
+      self.task = nil
       guard !Task.isCancelled,
-        let self,
-        self.isCapacityPaneVisible,
-        self.generation == operationGeneration
+        self.isCapacityPaneVisible || completedMutation
       else { return }
       self.status = switch inspection {
       case .notConfigured:
@@ -612,7 +657,6 @@ final class CodexCapacityMCPRegistrationController: ObservableObject {
       case .checkFailed: checkFailureStatus
       case .unsupportedInstallation: .unsupportedInstallation
       }
-      self.task = nil
     }
   }
 }

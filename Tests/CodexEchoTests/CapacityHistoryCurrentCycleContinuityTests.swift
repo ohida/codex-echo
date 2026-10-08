@@ -458,8 +458,7 @@ final class CapacityHistoryCurrentCycleContinuityTests: XCTestCase {
     )
     assertActivePresentation(at: clock.value)
     let enabledHistory = try await harness.store.readAll()
-    XCTAssertEqual(enabledHistory.count, 1)
-    XCTAssertEqual(enabledHistory[0].observedAt, clock.value)
+    XCTAssertTrue(enabledHistory.isEmpty)
 
     clock.value = now.addingTimeInterval(240)
     try await harness.recorder.clearHistory()
@@ -477,7 +476,7 @@ final class CapacityHistoryCurrentCycleContinuityTests: XCTestCase {
     assertActivePresentation(at: clock.value)
     let afterClear = try await harness.store.readAll()
     XCTAssertEqual(afterClear.count, 1)
-    XCTAssertEqual(afterClear[0].observedAt, clock.value)
+    XCTAssertEqual(try XCTUnwrap(afterClear.first).observedAt, clock.value)
 
     clock.value = now.addingTimeInterval(360)
     harness.settings.recordsCapacityHistory = false

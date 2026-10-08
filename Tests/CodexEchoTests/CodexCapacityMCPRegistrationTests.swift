@@ -240,21 +240,100 @@ final class CodexCapacityMCPRegistrationTests: XCTestCase {
     }
   }
 
-  func testDiskImageAndAppTranslocationAreRejectedBeforeRunningCodex() async throws {
+  func testUnstableInstallationsAreRejectedBeforeSetupRunsCodex() async throws {
     for bundlePath in [
       "/Volumes/Codex Echo/Codex Echo.app",
       "/private/var/folders/example/AppTranslocation/Codex Echo.app",
+      "/Users/example/Downloads/Codex Echo.app",
+      "/Users/example/Desktop/Codex Echo.app",
+      "/tmp/Codex Echo.app",
     ] {
       let fixture = try RegistrationFixture(
         bundleURL: URL(fileURLWithPath: bundlePath),
         results: []
       )
 
-      let inspection = await fixture.service.inspect()
+      let inspection = await fixture.service.setUp()
       let invocations = await fixture.runner.invocations
       XCTAssertEqual(inspection, .unsupportedInstallation)
       XCTAssertEqual(invocations.count, 0)
     }
+  }
+
+  func testStableInstallationsUseCanonicalDescendantPaths() throws {
+    let userApplications = URL(fileURLWithPath: "/Users/example/Applications")
+    for path in [
+      "/Applications/Codex Echo.app",
+      "/Applications/Tools/Codex Echo.app",
+      "/Users/example/Applications/Codex Echo.app",
+      "/Users/example/Applications/Tools/Codex Echo.app",
+    ] {
+      XCTAssertTrue(CodexCapacityMCPRegistrationService.isSupportedInstallation(
+        bundleURL: URL(fileURLWithPath: path),
+        userApplicationsURL: userApplications
+      ), path)
+    }
+    for path in [
+      "/ApplicationsBackup/Codex Echo.app",
+      "/Users/example/ApplicationsBackup/Codex Echo.app",
+      "/Users/example/Downloads/Codex Echo.app",
+      "/tmp/Codex Echo.app",
+      "/Volumes/Disk/Codex Echo.app",
+      "/private/var/folders/example/AppTranslocation/Codex Echo.app",
+    ] {
+      XCTAssertFalse(CodexCapacityMCPRegistrationService.isSupportedInstallation(
+        bundleURL: URL(fileURLWithPath: path),
+        userApplicationsURL: userApplications
+      ), path)
+    }
+  }
+
+  func testSymlinkOutOfApplicationsIsRejectedForSetup() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let userApplications = directory.appendingPathComponent("Applications", isDirectory: true)
+    let download = directory.appendingPathComponent("Downloads/Codex Echo.app", isDirectory: true)
+    try FileManager.default.createDirectory(at: userApplications,
+      withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: download,
+      withIntermediateDirectories: true)
+    let symlink = userApplications.appendingPathComponent("Codex Echo.app")
+    try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: download)
+
+    XCTAssertFalse(CodexCapacityMCPRegistrationService.isSupportedInstallation(
+      bundleURL: symlink, userApplicationsURL: userApplications
+    ))
+
+    let nonAppTarget = userApplications.appendingPathComponent("OtherDirectory")
+    try FileManager.default.createDirectory(at: nonAppTarget,
+      withIntermediateDirectories: true)
+    let disguisedApp = userApplications.appendingPathComponent("Disguised.app")
+    try FileManager.default.createSymbolicLink(at: disguisedApp,
+      withDestinationURL: nonAppTarget)
+    XCTAssertFalse(CodexCapacityMCPRegistrationService.isSupportedInstallation(
+      bundleURL: disguisedApp, userApplicationsURL: userApplications
+    ))
+  }
+
+  func testExistingMatchingRegistrationCanBeRemovedFromUnstableLocation() async throws {
+    let bundleURL = URL(fileURLWithPath: "/tmp/Codex Echo.app")
+    let fixture = try RegistrationFixture(bundleURL: bundleURL, results: [])
+    let configured = registrationJSON(enabled: true,
+      command: fixture.echoExecutableURL.path, args: ["--mcp-stdio"])
+    await fixture.runner.append(.success(.init(terminationStatus: 0,
+      standardOutput: configured)))
+    let inspected = await fixture.service.inspect()
+    XCTAssertEqual(inspected, .configured)
+    await fixture.runner.append(.success(.init(terminationStatus: 0,
+      standardOutput: configured)))
+    await fixture.runner.append(.success(.init(terminationStatus: 0,
+      standardOutput: Data())))
+    await fixture.runner.append(.success(.init(terminationStatus: 0,
+      standardOutput: Data("[]".utf8))))
+
+    let removed = await fixture.service.remove()
+    XCTAssertEqual(removed, .notConfigured)
   }
 
   func testCanonicalPathComparisonAcceptsASymlinkedCommand() async throws {
@@ -447,6 +526,94 @@ final class CodexCapacityMCPRegistrationTests: XCTestCase {
     service.resumeInspection(at: 0, with: .notConfigured)
     await settleMainActorTasks()
     XCTAssertEqual(controller.status, .configured)
+  }
+
+  func testPaneLeaveKeepsStartedMutationThroughPostflight() async throws {
+    for removing in [false, true] {
+      let fixture = try RegistrationFixture(results: [])
+      let runner = PausingMutationCommandRunner(
+        removing: removing, echoExecutablePath: fixture.echoExecutableURL.path
+      )
+      let service = CodexCapacityMCPRegistrationService(
+        commandRunner: runner,
+        codexExecutableURL: { [fixture] in fixture.codexExecutableURL },
+        echoExecutableURL: { [fixture] in fixture.echoExecutableURL },
+        echoBundleURL: { URL(fileURLWithPath: "/Applications/Codex Echo.app") },
+        applicationSupportURL: { [fixture] in fixture.applicationSupportURL }
+      )
+      let controller = CodexCapacityMCPRegistrationController(service: service)
+      controller.setCapacityPaneVisible(true)
+      while controller.status == .checking { await Task.yield() }
+      XCTAssertEqual(controller.status, removing ? .configured : .notConfigured)
+
+      if removing { controller.remove() } else { controller.setUp() }
+      while await runner.mutationInvocationCount == 0 { await Task.yield() }
+      controller.setCapacityPaneVisible(false)
+      controller.setCapacityPaneVisible(true)
+      controller.refreshIfVisible()
+      controller.tryAgain()
+      XCTAssertEqual(controller.status, removing ? .removing : .settingUp)
+      let callsBeforeCompletion = await runner.invocations
+      XCTAssertEqual(callsBeforeCompletion.count, 3)
+      XCTAssertEqual(callsBeforeCompletion.filter {
+        $0.contains(removing ? "remove" : "add")
+      }.count, 1)
+
+      await runner.resumeMutation()
+      while await runner.invocations.count < 4 { await Task.yield() }
+      controller.setCapacityPaneVisible(false)
+      controller.setCapacityPaneVisible(true)
+      controller.refreshIfVisible()
+      controller.tryAgain()
+      let callsDuringPostflight = await runner.invocations
+      XCTAssertEqual(callsDuringPostflight.count, 4)
+      controller.setCapacityPaneVisible(false)
+      XCTAssertEqual(controller.status, removing ? .removing : .settingUp)
+      await runner.resumePostflight()
+      while controller.status == .removing || controller.status == .settingUp {
+        await Task.yield()
+      }
+      XCTAssertEqual(controller.status, removing ? .removed : .configured)
+      let mutationWasCancelled = await runner.mutationWasCancelled
+      XCTAssertFalse(mutationWasCancelled)
+      let callsAfterCompletion = await runner.invocations
+      XCTAssertEqual(callsAfterCompletion.count, 4)
+      XCTAssertEqual(callsAfterCompletion.last, ["mcp", "list", "--json"])
+
+      controller.setCapacityPaneVisible(true)
+      while controller.status == .checking { await Task.yield() }
+      let callsAfterReentry = await runner.invocations
+      XCTAssertEqual(callsAfterReentry.count, 5)
+      XCTAssertEqual(controller.status, removing ? .notConfigured : .configured)
+    }
+  }
+
+  func testPaneLeaveDuringPreflightDoesNotStartMutation() async throws {
+    for removing in [false, true] {
+      let fixture = try RegistrationFixture(results: [])
+      let runner = PausingPreflightCommandRunner(
+        removing: removing, echoExecutablePath: fixture.echoExecutableURL.path
+      )
+      let service = CodexCapacityMCPRegistrationService(
+        commandRunner: runner,
+        codexExecutableURL: { [fixture] in fixture.codexExecutableURL },
+        echoExecutableURL: { [fixture] in fixture.echoExecutableURL },
+        echoBundleURL: { URL(fileURLWithPath: "/Applications/Codex Echo.app") },
+        applicationSupportURL: { [fixture] in fixture.applicationSupportURL }
+      )
+      let controller = CodexCapacityMCPRegistrationController(service: service)
+      controller.setCapacityPaneVisible(true)
+      while controller.status == .checking { await Task.yield() }
+      if removing { controller.remove() } else { controller.setUp() }
+      while await runner.invocations.count < 2 { await Task.yield() }
+
+      controller.setCapacityPaneVisible(false)
+      await runner.resumePreflight()
+      for _ in 0..<10 { await Task.yield() }
+      let calls = await runner.invocations
+      XCTAssertEqual(calls.count, 2)
+      XCTAssertTrue(calls.allSatisfy { $0 == ["mcp", "list", "--json"] })
+    }
   }
 
   func testControllerDoesNothingUntilCapacityPaneIsVisible() async {
@@ -651,6 +818,99 @@ private actor PausingRegistrationCommandRunner: CodexCapacityMCPCommandRunning {
   }
 }
 
+private actor PausingMutationCommandRunner: CodexCapacityMCPCommandRunning {
+  let removing: Bool
+  let echoExecutablePath: String
+  private var continuation: CheckedContinuation<Void, Never>?
+  private var postflightContinuation: CheckedContinuation<Void, Never>?
+  private(set) var invocations: [[String]] = []
+  private(set) var mutationInvocationCount = 0
+  private(set) var mutationWasCancelled = false
+
+  init(removing: Bool, echoExecutablePath: String) {
+    self.removing = removing
+    self.echoExecutablePath = echoExecutablePath
+  }
+
+  func run(
+    executableURL: URL, arguments: [String], currentDirectoryURL: URL,
+    limits: CodexCapacityMCPCommandLimits
+  ) async -> Result<CodexCapacityMCPCommandResult, CodexCapacityMCPCommandFailure> {
+    invocations.append(arguments)
+    if arguments.contains("add") || arguments.contains("remove") {
+      mutationInvocationCount += 1
+      await withCheckedContinuation { continuation = $0 }
+      mutationWasCancelled = Task.isCancelled
+      return .success(.init(terminationStatus: 0, standardOutput: Data()))
+    }
+    if invocations.count == 4 {
+      await withCheckedContinuation { postflightContinuation = $0 }
+    }
+    let isConfigured = removing ? invocations.count < 4 : invocations.count >= 4
+    let output: Data
+    if isConfigured {
+      let object: [[String: Any]] = [[
+        "name": "codex-echo", "enabled": true,
+        "transport": ["type": "stdio", "command": echoExecutablePath,
+          "args": ["--mcp-stdio"]],
+      ]]
+      output = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+    } else {
+      output = Data("[]".utf8)
+    }
+    return .success(.init(terminationStatus: 0, standardOutput: output))
+  }
+
+  func resumeMutation() {
+    continuation?.resume()
+    continuation = nil
+  }
+
+  func resumePostflight() {
+    postflightContinuation?.resume()
+    postflightContinuation = nil
+  }
+}
+
+private actor PausingPreflightCommandRunner: CodexCapacityMCPCommandRunning {
+  let removing: Bool
+  let echoExecutablePath: String
+  private var continuation: CheckedContinuation<Void, Never>?
+  private(set) var invocations: [[String]] = []
+
+  init(removing: Bool, echoExecutablePath: String) {
+    self.removing = removing
+    self.echoExecutablePath = echoExecutablePath
+  }
+
+  func run(
+    executableURL: URL, arguments: [String], currentDirectoryURL: URL,
+    limits: CodexCapacityMCPCommandLimits
+  ) async -> Result<CodexCapacityMCPCommandResult, CodexCapacityMCPCommandFailure> {
+    invocations.append(arguments)
+    if invocations.count == 2 {
+      await withCheckedContinuation { continuation = $0 }
+    }
+    let output: Data
+    if removing {
+      let object: [[String: Any]] = [[
+        "name": "codex-echo", "enabled": true,
+        "transport": ["type": "stdio", "command": echoExecutablePath,
+          "args": ["--mcp-stdio"]],
+      ]]
+      output = (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+    } else {
+      output = Data("[]".utf8)
+    }
+    return .success(.init(terminationStatus: 0, standardOutput: output))
+  }
+
+  func resumePreflight() {
+    continuation?.resume()
+    continuation = nil
+  }
+}
+
 @MainActor
 private final class RegistrationServiceSpy: CodexCapacityMCPRegistrationServicing {
   var result: CodexCapacityMCPRegistrationInspection
@@ -667,12 +927,16 @@ private final class RegistrationServiceSpy: CodexCapacityMCPRegistrationServicin
     return result
   }
 
-  func setUp() async -> CodexCapacityMCPRegistrationInspection {
+  func setUp(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection {
     setupCallCount += 1
     return result
   }
 
-  func remove() async -> CodexCapacityMCPRegistrationInspection {
+  func remove(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection {
     removeCallCount += 1
     return result
   }
@@ -695,8 +959,12 @@ private final class PausingRegistrationServiceSpy: CodexCapacityMCPRegistrationS
     inspections[index].resume(returning: result)
   }
 
-  func setUp() async -> CodexCapacityMCPRegistrationInspection { .checkFailed }
-  func remove() async -> CodexCapacityMCPRegistrationInspection { .checkFailed }
+  func setUp(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection { .checkFailed }
+  func remove(
+    onMutationStarting: @escaping @MainActor () -> Void
+  ) async -> CodexCapacityMCPRegistrationInspection { .checkFailed }
 }
 
 @MainActor

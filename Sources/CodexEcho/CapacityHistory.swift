@@ -1158,6 +1158,8 @@ final class CapacityHistoryRecorder: ObservableObject {
   }
 
   private var policies: [PolicyKey: CapacityHistoryRecordingPolicy] = [:]
+  private var lastObservedWindows: [CodexRateLimitWindow]?
+  private var lastWindowsObservedAt: Date?
   private var isClearing = false
   private var currentCycleExpiryTask: Task<Void, Never>?
   private var cancellables = Set<AnyCancellable>()
@@ -1301,10 +1303,25 @@ final class CapacityHistoryRecorder: ObservableObject {
       snapshot,
       observedAt: observedAt
     )
+    let hasNewWindowObservation = !snapshot.windows.isEmpty
+      && (lastObservedWindows == nil
+        || snapshot.windowsObservedAt == nil
+        || snapshot.windowsObservedAt != lastWindowsObservedAt
+        || snapshot.windows != lastObservedWindows)
+    if !snapshot.windows.isEmpty {
+      lastObservedWindows = snapshot.windows
+      lastWindowsObservedAt = snapshot.windowsObservedAt
+    }
+    let needsLiveRefresh = liveValuesByDuration.isEmpty
+      && !snapshot.windows.isEmpty
+    guard hasNewWindowObservation || snapshot.windows.isEmpty
+      || !isRecordingEnabled || isClearing || needsLiveRefresh
+    else { return }
     let observations = capture(
       snapshot: snapshot,
       observedAt: observedAt,
       recordsHistory: !isClearing && isRecordingEnabled
+        && hasNewWindowObservation
     )
     receivedLiveValuesByDuration = liveValuesByDuration
     for observation in observations {
@@ -1321,19 +1338,15 @@ final class CapacityHistoryRecorder: ObservableObject {
     }
     liveSessionID = nil
     guard
-      isEnabled,
       model.appServerConnectionState == .running,
       let snapshot = model.codexUsageSnapshot
     else { return }
 
-    let observations = capture(
+    _ = capture(
       snapshot: snapshot,
       observedAt: snapshot.windowsObservedAt ?? now(),
-      recordsHistory: true
+      recordsHistory: false
     )
-    for observation in observations {
-      persist(observation)
-    }
   }
 
   func liveValue(

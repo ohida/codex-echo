@@ -2116,7 +2116,7 @@ final class CapacityHistoryTests: XCTestCase {
   }
 
   @MainActor
-  func testDisabledCapacityRecordingKeepsLiveUsageWithoutPersistingAndResumesFromCurrentUsage()
+  func testDisabledCapacityRecordingKeepsLiveUsageAndWaitsForNextUpdateToResume()
     async throws
   {
     let suiteName = "CapacityUsageRecordingTests-\(UUID().uuidString)"
@@ -2170,11 +2170,22 @@ final class CapacityHistoryTests: XCTestCase {
 
     settings.recordsCapacityHistory = true
     XCTAssertTrue(recorder.isRecordingEnabled)
-    XCTAssertNotNil(recorder.liveSessionID)
+    XCTAssertNil(recorder.liveSessionID)
     let firstSession = try await store.readAll()
-    let firstObservation = try XCTUnwrap(firstSession.last)
+    XCTAssertTrue(firstSession.isEmpty)
 
-    XCTAssertEqual(firstSession.count, 1)
+    appServerClient.eventHandler?(
+      .usageChanged(
+        CodexUsageSnapshot(
+          usedPercent: 40,
+          windowDurationMinutes: 10_080,
+          resetsAt: nil
+        )
+      )
+    )
+    let recordedAfterUpdate = try await store.readAll()
+    let firstObservation = try XCTUnwrap(recordedAfterUpdate.last)
+    XCTAssertEqual(recordedAfterUpdate.count, 1)
     XCTAssertEqual(firstObservation.remainingPercent, 60)
     XCTAssertEqual(recorder.liveSessionID, firstObservation.sessionID)
 
@@ -2192,15 +2203,184 @@ final class CapacityHistoryTests: XCTestCase {
     XCTAssertEqual(recorder.liveRemainingPercent, 58)
     XCTAssertNil(recorder.liveSessionID)
     let storedAfterDisabledUpdate = try await store.readAll()
-    XCTAssertEqual(storedAfterDisabledUpdate, firstSession)
+    XCTAssertEqual(storedAfterDisabledUpdate, recordedAfterUpdate)
 
     settings.recordsCapacityHistory = true
     let resumed = try await store.readAll()
-    let resumedObservation = try XCTUnwrap(resumed.last)
+    XCTAssertEqual(resumed, recordedAfterUpdate)
 
-    XCTAssertEqual(resumed.count, 2)
+    appServerClient.eventHandler?(
+      .usageChanged(
+        CodexUsageSnapshot(
+          usedPercent: 42,
+          windowDurationMinutes: 10_080,
+          resetsAt: nil
+        )
+      )
+    )
+    let afterFreshUpdate = try await store.readAll()
+    let resumedObservation = try XCTUnwrap(afterFreshUpdate.last)
+
+    XCTAssertEqual(afterFreshUpdate.count, 2)
     XCTAssertEqual(resumedObservation.remainingPercent, 58)
     XCTAssertNotEqual(resumedObservation.sessionID, firstObservation.sessionID)
+  }
+
+  @MainActor
+  func testReenabledRecorderWaitsForFreshWindowsAndHistoryRemainsQueryable()
+    async throws
+  {
+    let suiteName = "CapacityHistoryResumeTests-\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let settings = MenuBarSettings(userDefaults: defaults)
+    let appServerClient = CodexAppServerClient(
+      executableURL: URL(fileURLWithPath: "/usr/bin/false")
+    )
+    let model = CodexActivityModel(
+      appServerClient: appServerClient,
+      settings: settings,
+      userDefaults: defaults,
+      debugTaskFixtureName: "idle"
+    )
+    let fileURL = temporaryHistoryURL()
+    defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+    let store = CapacityHistoryStore(fileURL: fileURL)
+    let currentStore = CapacityCurrentSnapshotStore(
+      fileURL: CapacityCurrentSnapshotStore.defaultFileURL(
+        historyFileURL: fileURL
+      )
+    )
+    defer { currentStore.flushSynchronously() }
+    let observedAt = Date(timeIntervalSince1970: 1_800_000_000)
+    let recorder = CapacityHistoryRecorder(
+      model: model,
+      store: store,
+      currentSnapshotStore: currentStore,
+      now: { observedAt.addingTimeInterval(120) }
+    )
+    let original = CodexUsageSnapshot(
+      usedPercent: 20,
+      windowDurationMinutes: 300,
+      resetsAt: nil,
+      windowsObservedAt: observedAt
+    )
+
+    appServerClient.eventHandler?(.connectionStateChanged(.running))
+    appServerClient.eventHandler?(.usageChanged(original))
+    let initial = try await store.readAll()
+    XCTAssertEqual(initial.count, 1)
+
+    settings.recordsCapacityHistory = false
+    settings.recordsCapacityHistory = true
+    let afterReenable = try await store.readAll()
+    XCTAssertEqual(afterReenable, initial)
+    currentStore.flushSynchronously()
+    XCTAssertEqual(
+      try currentStore.readSynchronously()?.historyRecordingEnabled,
+      true
+    )
+
+    for resolution in [CapacityMCPHistoryResolution.auto, .raw] {
+      let result = try CapacityMCPHistoryQueryEngine(fileURL: fileURL).query(
+        .init(
+          windowDurationMinutes: 300,
+          range: .custom,
+          startAt: observedAt.addingTimeInterval(-60),
+          endAt: observedAt.addingTimeInterval(180),
+          resolution: resolution
+        ),
+        now: observedAt.addingTimeInterval(180)
+      )
+      XCTAssertEqual(result.windows.first?.summary.sourcePointCount, 1)
+      XCTAssertEqual(result.points.count, 1)
+    }
+
+    let creditsOnly = CodexUsageSnapshot(
+      windows: original.windows,
+      credits: CodexCreditsSnapshot(
+        balance: "62500",
+        hasCredits: true,
+        unlimited: false,
+        observedAt: observedAt.addingTimeInterval(90)
+      ),
+      windowsObservedAt: observedAt
+    )
+    appServerClient.eventHandler?(.usageChanged(creditsOnly))
+    let afterCachedUpdate = try await store.readAll()
+    XCTAssertEqual(afterCachedUpdate, initial)
+    currentStore.flushSynchronously()
+    XCTAssertEqual(
+      try currentStore.readSynchronously()?.lastSuccess?.credits?.balance,
+      "62500"
+    )
+
+    let fresh = CodexUsageSnapshot(
+      usedPercent: 20,
+      windowDurationMinutes: 300,
+      resetsAt: nil,
+      windowsObservedAt: observedAt.addingTimeInterval(60)
+    )
+    appServerClient.eventHandler?(.usageChanged(fresh))
+    let afterFresh = try await store.readAll()
+    XCTAssertEqual(afterFresh.count, 2)
+    XCTAssertEqual(afterFresh.last?.remainingPercent, 80)
+    XCTAssertNotEqual(afterFresh.first?.sessionID, afterFresh.last?.sessionID)
+    XCTAssertEqual(recorder.liveSessionID, afterFresh.last?.sessionID)
+    appServerClient.eventHandler?(
+      .usageChanged(
+        CodexUsageSnapshot(
+          windows: fresh.windows,
+          credits: CodexCreditsSnapshot(
+            balance: "62400",
+            hasCredits: true,
+            unlimited: false,
+            observedAt: observedAt.addingTimeInterval(120)
+          ),
+          windowsObservedAt: fresh.windowsObservedAt
+        )
+      )
+    )
+    let afterSecondCreditsUpdate = try await store.readAll()
+    XCTAssertEqual(afterSecondCreditsUpdate, afterFresh)
+    XCTAssertEqual(recorder.liveSessionID, afterFresh.last?.sessionID)
+    for resolution in [CapacityMCPHistoryResolution.auto, .raw] {
+      let result = try CapacityMCPHistoryQueryEngine(fileURL: fileURL).query(
+        .init(
+          windowDurationMinutes: 300,
+          range: .custom,
+          startAt: observedAt.addingTimeInterval(-60),
+          endAt: observedAt.addingTimeInterval(180),
+          resolution: resolution
+        ),
+        now: observedAt.addingTimeInterval(180)
+      )
+      XCTAssertEqual(result.windows.first?.summary.sourcePointCount, 2)
+      XCTAssertEqual(result.windows.first?.summary.gapCount, 1)
+      XCTAssertEqual(result.points.count, 2)
+    }
+
+    appServerClient.eventHandler?(.connectionStateChanged(.stopped))
+    XCTAssertNil(recorder.liveValue(for: .shortWindow))
+    appServerClient.eventHandler?(.connectionStateChanged(.running))
+    appServerClient.eventHandler?(.usageChanged(fresh))
+    let afterCachedReconnect = try await store.readAll()
+    XCTAssertEqual(afterCachedReconnect, afterFresh)
+    XCTAssertEqual(recorder.liveValue(for: .shortWindow)?.remainingPercent, 80)
+    XCTAssertNil(recorder.liveSessionID)
+
+    appServerClient.eventHandler?(
+      .usageChanged(CodexUsageSnapshot(windows: []))
+    )
+    let afterEmptyWindows = try await store.readAll()
+    XCTAssertEqual(afterEmptyWindows, afterFresh)
+    XCTAssertNil(recorder.liveRemainingPercent)
+    XCTAssertNil(recorder.liveValue(for: .shortWindow))
+    XCTAssertNil(recorder.receivedLiveValue(for: .shortWindow))
+    currentStore.flushSynchronously()
+    XCTAssertTrue(
+      try XCTUnwrap(currentStore.readSynchronously()?.lastSuccess).windows.isEmpty
+    )
   }
 
   @MainActor
