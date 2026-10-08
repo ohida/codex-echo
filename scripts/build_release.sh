@@ -7,7 +7,9 @@ official_repository_url="https://github.com/ohida/codex-echo"
 stable_feed_url="https://updates.ohida.app/codex-echo/appcast.xml"
 immutable_download_root="https://updates.ohida.app/codex-echo/releases"
 sparkle_version="2.9.4"
-sparkle_revision="b6496a74a087257ef5e6da1c5b29a447a60f5bd7"
+mcp_sdk_version="0.12.1"
+# Bind the complete reviewed lock, including dependencies pruned by newer SwiftPM.
+package_resolved_sha256="3cec18c797eb0d74435fbd7586ec0b1d5482b5adb6e3b0cc80c634492985f6f9"
 sparkle_archive_url="https://github.com/sparkle-project/Sparkle/releases/download/2.9.4/Sparkle-for-Swift-Package-Manager.zip"
 sparkle_archive_sha256="cb6fdbdc8884f15d62a616e79face92b08322410fd2d425edc6596ccbf4ba3b0"
 sparkle_public_key="cMXp1w6Tx8sJunwcUo2JG7vQ/qO63do4we0TpqgV34s="
@@ -24,6 +26,10 @@ sha256_file() {
 
 run_codesign() {
   /usr/bin/codesign "$@"
+}
+
+run_swift_build() {
+  /usr/bin/swift build "$@"
 }
 
 run_hdiutil() {
@@ -247,8 +253,12 @@ validate_source_package() {
   /usr/bin/swift package \
     --package-path "$source_root" \
     dump-package > "$package_description"
-  if ! /usr/bin/jq -e --arg sparkleVersion "$sparkle_version" '
+  if ! /usr/bin/jq -e \
+    --arg sparkleVersion "$sparkle_version" \
+    --arg mcpSDKVersion "$mcp_sdk_version" '
     def target($name): .targets[] | select(.name == $name);
+    def dependency($identity):
+      .dependencies[].sourceControl[0] | select(.identity == $identity);
     (.name == "CodexEcho")
     and (.toolsVersion._version == "6.0.0")
     and (.platforms == [{options: [], platformName: "macos", version: "14.0"}])
@@ -262,18 +272,28 @@ validate_source_package() {
     and (.products[0].name == "CodexEcho")
     and (.products[0].targets == ["CodexEcho"])
     and (.products[0].type.executable == null)
-    and (.dependencies | length == 1)
-    and (.dependencies[0].sourceControl | length == 1)
-    and (.dependencies[0].sourceControl[0].identity == "sparkle")
-    and (.dependencies[0].sourceControl[0].productFilter == null)
-    and (.dependencies[0].sourceControl[0].traits == [{name: "default"}])
+    and (.dependencies | length == 2)
+    and ([.dependencies[].sourceControl[0].identity] | sort
+      == ["sparkle", "swift-sdk"])
+    and all(.dependencies[];
+      (.sourceControl | length == 1)
+      and (.sourceControl[0].productFilter == null)
+      and (.sourceControl[0].traits == [{name: "default"}]))
     and (
-      .dependencies[0].sourceControl[0].location.remote[0].urlString
+      dependency("sparkle").location.remote[0].urlString
       == "https://github.com/sparkle-project/Sparkle"
     )
     and (
-      .dependencies[0].sourceControl[0].requirement.exact[0]
+      dependency("sparkle").requirement.exact[0]
       == $sparkleVersion
+    )
+    and (
+      dependency("swift-sdk").location.remote[0].urlString
+      == "https://github.com/modelcontextprotocol/swift-sdk"
+    )
+    and (
+      dependency("swift-sdk").requirement.exact[0]
+      == $mcpSDKVersion
     )
     and (
       [.targets[].name] | sort
@@ -303,6 +323,7 @@ validate_source_package() {
           end]
       | sort
       == [
+        "product:MCP@swift-sdk",
         "product:Sparkle@Sparkle",
         "target:CodexAppServer",
         "target:CodexIPC"
@@ -310,8 +331,15 @@ validate_source_package() {
     )
     and (target("CodexEchoTests").type == "test")
     and (
-      target("CodexEchoTests").dependencies
-      == [{byName: ["CodexEcho", null]}]
+      [target("CodexEchoTests").dependencies[]
+        | if has("byName") then "target:\(.byName[0])"
+          else "product:\(.product[0])@\(.product[1])"
+          end]
+      | sort
+      == [
+        "product:MCP@swift-sdk",
+        "target:CodexEcho"
+      ]
     )
     and (target("CodexIPCTests").type == "test")
     and (
@@ -327,18 +355,8 @@ validate_source_package() {
   fi
   /bin/rm -f -- "$package_description"
 
-  if ! /usr/bin/jq -e \
-    --arg version "$sparkle_version" \
-    --arg revision "$sparkle_revision" '
-      (.pins | length == 1)
-      and (.pins[0].identity == "sparkle")
-      and (.pins[0].kind == "remoteSourceControl")
-      and (.pins[0].location == "https://github.com/sparkle-project/Sparkle")
-      and (.pins[0].state.version == $version)
-      and (.pins[0].state.revision == $revision)
-    ' "$source_root/Package.resolved" >/dev/null
-  then
-    die "Package.resolved does not contain the reviewed Sparkle pin."
+  if [[ "$(sha256_file "$source_root/Package.resolved")" != "$package_resolved_sha256" ]]; then
+    die "Package.resolved does not contain the reviewed dependency pins."
   fi
 }
 
@@ -361,14 +379,17 @@ prepare_source() {
   validate_source_package "$source_root"
   require_empty_destination "$payload_directory"
 
-  /usr/bin/swift build \
+  run_swift_build \
+    --force-resolved-versions \
     --package-path "$source_root" \
     --configuration release \
     --product CodexEcho
-  bin_path="$(/usr/bin/swift build \
+  bin_path="$(run_swift_build \
+    --force-resolved-versions \
     --package-path "$source_root" \
     --configuration release \
     --show-bin-path)"
+  validate_source_package "$source_root"
   if [[ ! -x "$bin_path/CodexEcho" ]]; then
     die "SwiftPM did not produce CodexEcho."
   fi

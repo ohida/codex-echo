@@ -12,6 +12,10 @@ let package = Package(
   ],
   dependencies: [
     .package(
+      url: "https://github.com/modelcontextprotocol/swift-sdk",
+      exact: "0.12.1"
+    ),
+    .package(
       url: "https://github.com/sparkle-project/Sparkle",
       exact: "2.9.4"
     )
@@ -24,12 +28,16 @@ let package = Package(
       dependencies: [
         "CodexIPC",
         "CodexAppServer",
+        .product(name: "MCP", package: "swift-sdk"),
         .product(name: "Sparkle", package: "Sparkle"),
       ]
     ),
     .testTarget(
       name: "CodexEchoTests",
-      dependencies: ["CodexEcho"]
+      dependencies: [
+        "CodexEcho",
+        .product(name: "MCP", package: "swift-sdk"),
+      ]
     ),
     .testTarget(
       name: "CodexIPCTests",

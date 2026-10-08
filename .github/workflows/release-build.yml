@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
 
       - name: Test tagged source
-        run: /usr/bin/swift test --package-path source
+        run: /usr/bin/swift test --force-resolved-versions --package-path source
 
       - name: Build tagged app bundle
         run: source/scripts/build_app.sh

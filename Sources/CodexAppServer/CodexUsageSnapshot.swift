@@ -1,20 +1,62 @@
+import CoreFoundation
 import Foundation
+
+public struct CodexCreditsSnapshot: Equatable, Sendable {
+  public let balance: String?
+  public let hasCredits: Bool
+  public let unlimited: Bool
+  public let observedAt: Date
+
+  public init(
+    balance: String?,
+    hasCredits: Bool,
+    unlimited: Bool,
+    observedAt: Date
+  ) {
+    self.balance = balance
+    self.hasCredits = hasCredits
+    self.unlimited = unlimited
+    self.observedAt = observedAt
+  }
+
+  fileprivate init?(object: Any?, observedAt: Date) {
+    guard
+      let object = object as? [String: Any],
+      let hasCredits = object["hasCredits"] as? NSNumber,
+      CFGetTypeID(hasCredits) == CFBooleanGetTypeID(),
+      let unlimited = object["unlimited"] as? NSNumber,
+      CFGetTypeID(unlimited) == CFBooleanGetTypeID(),
+      object["balance"] == nil || object["balance"] is NSNull
+        || object["balance"] is String
+    else { return nil }
+    self.init(
+      balance: object["balance"] as? String,
+      hasCredits: hasCredits.boolValue,
+      unlimited: unlimited.boolValue,
+      observedAt: observedAt
+    )
+  }
+}
 
 public struct CodexRateLimitResetCredits: Equatable, Sendable {
   public let availableCount: Int
   public let expirationDates: [Date]
+  /// Local receipt time of the response that supplied this summary; not an upstream timestamp.
+  public let observedAt: Date?
 
   public init(
     availableCount: Int,
-    expirationDates: [Date]
+    expirationDates: [Date],
+    observedAt: Date? = nil
   ) {
+    self.observedAt = observedAt
     self.availableCount = max(availableCount, 0)
     self.expirationDates = Array(
       expirationDates.prefix(self.availableCount)
     )
   }
 
-  fileprivate init?(object: Any?) {
+  fileprivate init?(object: Any?, observedAt: Date) {
     guard
       let object = object as? [String: Any],
       let availableCount = (object["availableCount"] as? NSNumber)?.intValue
@@ -30,7 +72,8 @@ public struct CodexRateLimitResetCredits: Equatable, Sendable {
 
     self.init(
       availableCount: availableCount,
-      expirationDates: expirationDates
+      expirationDates: expirationDates,
+      observedAt: observedAt
     )
   }
 }
@@ -112,6 +155,9 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
   public let limitID: String
   public let windows: [CodexRateLimitWindow]
   public let rateLimitResetCredits: CodexRateLimitResetCredits?
+  public let credits: CodexCreditsSnapshot?
+  public let windowsObservedAt: Date?
+  private let includesCreditsUpdate: Bool
 
   public var primaryWindow: CodexRateLimitWindow? {
     windows.first { $0.slot == .primary }
@@ -148,8 +194,8 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     constrainingWindow?.resetsAt
   }
 
-  public var remainingPercent: Int {
-    100 - usedPercent
+  public var remainingPercent: Int? {
+    constrainingWindow?.remainingPercent
   }
 
   public func window(
@@ -169,7 +215,9 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     usedPercent: Int,
     windowDurationMinutes: Int? = nil,
     resetsAt: Date? = nil,
-    rateLimitResetCredits: CodexRateLimitResetCredits? = nil
+    rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
+    credits: CodexCreditsSnapshot? = nil,
+    windowsObservedAt: Date? = nil
   ) {
     self.limitID = limitID
     windows = [
@@ -181,40 +229,57 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
       )
     ]
     self.rateLimitResetCredits = rateLimitResetCredits
+    self.credits = credits
+    self.windowsObservedAt = windowsObservedAt
+    includesCreditsUpdate = credits != nil
   }
 
   public init(
     limitID: String = Self.mainLimitID,
     windows: [CodexRateLimitWindow],
-    rateLimitResetCredits: CodexRateLimitResetCredits? = nil
+    rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
+    credits: CodexCreditsSnapshot? = nil,
+    windowsObservedAt: Date? = nil
   ) {
     self.limitID = limitID
     self.windows = windows
     self.rateLimitResetCredits = rateLimitResetCredits
+    self.credits = credits
+    self.windowsObservedAt = windowsObservedAt
+    includesCreditsUpdate = credits != nil
   }
 
   public init(
     limitID: String = Self.mainLimitID,
     primaryWindow: CodexRateLimitWindow?,
     secondaryWindow: CodexRateLimitWindow?,
-    rateLimitResetCredits: CodexRateLimitResetCredits? = nil
+    rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
+    credits: CodexCreditsSnapshot? = nil,
+    windowsObservedAt: Date? = nil
   ) {
     self.init(
       limitID: limitID,
       windows: [primaryWindow, secondaryWindow].compactMap { $0 },
-      rateLimitResetCredits: rateLimitResetCredits
+      rateLimitResetCredits: rateLimitResetCredits,
+      credits: credits,
+      windowsObservedAt: windowsObservedAt
     )
   }
 
-  static func readResult(_ result: [String: Any]) -> Self? {
+  static func readResult(
+    _ result: [String: Any],
+    observedAt: Date = Date()
+  ) -> Self? {
     let resetCredits = CodexRateLimitResetCredits(
-      object: result["rateLimitResetCredits"]
+      object: result["rateLimitResetCredits"],
+      observedAt: observedAt
     )
     if let buckets = result["rateLimitsByLimitId"] as? [String: Any],
       let mainBucket = buckets[mainLimitID] as? [String: Any],
       let snapshot = Self(
         rateLimitObject: mainBucket,
-        rateLimitResetCredits: resetCredits
+        rateLimitResetCredits: resetCredits,
+        observedAt: observedAt
       )
     {
       return snapshot
@@ -224,18 +289,22 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     }
     return Self(
       rateLimitObject: historicalBucket,
-      rateLimitResetCredits: resetCredits
+      rateLimitResetCredits: resetCredits,
+      observedAt: observedAt
     )
   }
 
-  static func updatedNotification(_ params: [String: Any]) -> Self? {
+  static func updatedNotification(
+    _ params: [String: Any],
+    observedAt: Date = Date()
+  ) -> Self? {
     guard
       let rateLimits = params["rateLimits"] as? [String: Any],
       rateLimits["limitId"] as? String == mainLimitID
     else {
       return nil
     }
-    return Self(rateLimitObject: rateLimits)
+    return Self(rateLimitObject: rateLimits, observedAt: observedAt)
   }
 
   func mergingMissingMetadata(from previous: Self?) -> Self {
@@ -253,7 +322,10 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     return Self(
       limitID: limitID,
       windows: mergedWindows,
-      rateLimitResetCredits: rateLimitResetCredits ?? previous.rateLimitResetCredits
+      rateLimitResetCredits: rateLimitResetCredits ?? previous.rateLimitResetCredits,
+      credits: includesCreditsUpdate ? credits : previous.credits,
+      windowsObservedAt: windows.isEmpty ? previous.windowsObservedAt : windowsObservedAt,
+      includesCreditsUpdate: includesCreditsUpdate
     )
   }
 
@@ -268,13 +340,17 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     return Self(
       limitID: limitID,
       windows: windows,
-      rateLimitResetCredits: previousResetCredits
+      rateLimitResetCredits: previousResetCredits,
+      credits: credits,
+      windowsObservedAt: windowsObservedAt,
+      includesCreditsUpdate: includesCreditsUpdate
     )
   }
 
   private init?(
     rateLimitObject: [String: Any],
-    rateLimitResetCredits: CodexRateLimitResetCredits? = nil
+    rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
+    observedAt: Date
   ) {
     let observedLimitID = rateLimitObject["limitId"] as? String
     guard observedLimitID == nil || observedLimitID == Self.mainLimitID else {
@@ -303,11 +379,35 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
       }
       return lhs.slot.rawValue < rhs.slot.rawValue
     }
-    guard !windows.isEmpty else { return nil }
+    let credits = CodexCreditsSnapshot(
+      object: rateLimitObject["credits"],
+      observedAt: observedAt
+    )
+    guard !windows.isEmpty || credits != nil || rateLimitObject["credits"] is NSNull
+    else { return nil }
     self.init(
       limitID: observedLimitID ?? Self.mainLimitID,
       windows: windows,
-      rateLimitResetCredits: rateLimitResetCredits
+      rateLimitResetCredits: rateLimitResetCredits,
+      credits: credits,
+      windowsObservedAt: windows.isEmpty ? nil : observedAt,
+      includesCreditsUpdate: rateLimitObject["credits"] != nil
     )
+  }
+
+  private init(
+    limitID: String,
+    windows: [CodexRateLimitWindow],
+    rateLimitResetCredits: CodexRateLimitResetCredits?,
+    credits: CodexCreditsSnapshot?,
+    windowsObservedAt: Date?,
+    includesCreditsUpdate: Bool
+  ) {
+    self.limitID = limitID
+    self.windows = windows
+    self.rateLimitResetCredits = rateLimitResetCredits
+    self.credits = credits
+    self.windowsObservedAt = windowsObservedAt
+    self.includesCreditsUpdate = includesCreditsUpdate
   }
 }

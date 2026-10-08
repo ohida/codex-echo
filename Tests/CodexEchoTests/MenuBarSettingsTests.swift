@@ -190,6 +190,42 @@ final class MenuBarSettingsTests: XCTestCase {
       MenuBarSettingsCopy.recordCapacityHistoryDescription,
       "Saves new Capacity observations locally. Turning this off stops new entries; existing history remains available until cleared."
     )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.useCapacityInCodexTitle,
+      "Use Capacity in Codex via MCP"
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.useCapacityInCodexDescription,
+      "Adds Echo’s local, read-only Capacity tools to Codex, including current values and history."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.configuredCapacityInCodexDescription,
+      "Restart Codex if the tools aren’t available yet."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.removingCapacityFromCodexDescription,
+      "Removing Echo’s Capacity tools from Codex."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.removedCapacityFromCodexDescription,
+      "Restart Codex if the tools are still available."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.capacityRemovalFailedDescription,
+      "Couldn’t remove Echo from Codex."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.existingCapacityRegistrationDescription,
+      "“codex-echo” already exists in Codex. Review it in Codex Settings → MCP servers; Echo won’t replace it."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.capacitySetupCheckFailedDescription,
+      "Couldn’t check Codex setup."
+    )
+    XCTAssertEqual(
+      MenuBarSettingsCopy.unsupportedCapacitySetupDescription,
+      "Move Codex Echo to an Applications folder and reopen it before setup."
+    )
     XCTAssertEqual(MenuBarSettingsCopy.codexCapacityMenuTitle, "Codex Capacity")
     XCTAssertEqual(
       CapacityMenuItemPresentation.systemImageName,
@@ -1518,6 +1554,10 @@ final class MenuBarSettingsTests: XCTestCase {
           canCheckForUpdates: true,
           automaticallyChecksForUpdates: true
         ),
+        capacityMCPRegistration:
+          CodexCapacityMCPRegistrationController(
+            staticStatus: .notConfigured
+          ),
         previewSpokenVoice: { _ in },
         openProjectCustomizationSettings: {},
         openSpokenAnnouncementSettings: {}

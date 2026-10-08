@@ -38,6 +38,23 @@ enum MenuBarSettingsCopy {
   static let recordCapacityHistoryTitle = "Record Capacity History"
   static let recordCapacityHistoryDescription =
     "Saves new Capacity observations locally. Turning this off stops new entries; existing history remains available until cleared."
+  static let useCapacityInCodexTitle = "Use Capacity in Codex via MCP"
+  static let useCapacityInCodexDescription =
+    "Adds Echo’s local, read-only Capacity tools to Codex, including current values and history."
+  static let configuredCapacityInCodexDescription =
+    "Restart Codex if the tools aren’t available yet."
+  static let removingCapacityFromCodexDescription =
+    "Removing Echo’s Capacity tools from Codex."
+  static let removedCapacityFromCodexDescription =
+    "Restart Codex if the tools are still available."
+  static let capacityRemovalFailedDescription =
+    "Couldn’t remove Echo from Codex."
+  static let existingCapacityRegistrationDescription =
+    "“codex-echo” already exists in Codex. Review it in Codex Settings → MCP servers; Echo won’t replace it."
+  static let capacitySetupCheckFailedDescription =
+    "Couldn’t check Codex setup."
+  static let unsupportedCapacitySetupDescription =
+    "Move Codex Echo to an Applications folder and reopen it before setup."
   static let automaticallyHideCompletedTasksTitle =
     "Hide completed tasks"
   static let automaticallyHideCompletedTasksDescription =
@@ -416,9 +433,11 @@ struct MenuBarSettingsView: View {
   @ObservedObject var settings: MenuBarSettings
   @ObservedObject var launchAtLogin: LaunchAtLoginController
   @ObservedObject var updateController: SparkleAppUpdateController
+  @ObservedObject var capacityMCPRegistration: CodexCapacityMCPRegistrationController
   let previewSpokenVoice: (SpokenUpdateVoice) -> Void
   let openProjectCustomizationSettings: () -> Void
   let openSpokenAnnouncementSettings: () -> Void
+  @State private var isVisible = false
 
   var body: some View {
     TabView(selection: $settings.selectedPane) {
@@ -435,15 +454,31 @@ struct MenuBarSettingsView: View {
     .background(Color(nsColor: .windowBackgroundColor))
     .background(SettingsWindowTitleView(title: settings.selectedPane.title))
     .onAppear {
+      isVisible = true
       launchAtLogin.refresh()
       updateController.refresh()
+      updateCapacityMCPRegistrationVisibility()
+    }
+    .onDisappear {
+      isVisible = false
+      capacityMCPRegistration.setCapacityPaneVisible(false)
+    }
+    .onChange(of: settings.selectedPane) { _, _ in
+      updateCapacityMCPRegistrationVisibility()
     }
     .onReceive(
       NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
     ) { _ in
       launchAtLogin.refresh()
       updateController.refresh()
+      capacityMCPRegistration.refreshIfVisible()
     }
+  }
+
+  private func updateCapacityMCPRegistrationVisibility() {
+    capacityMCPRegistration.setCapacityPaneVisible(
+      isVisible && settings.selectedPane == .capacity
+    )
   }
 
   @ViewBuilder
@@ -633,6 +668,77 @@ struct MenuBarSettingsView: View {
         .labelsHidden()
         .toggleStyle(.switch)
       }
+
+      Divider()
+
+      SettingsRow(
+        title: MenuBarSettingsCopy.useCapacityInCodexTitle,
+        description: capacityMCPRegistrationDescription
+      ) {
+        capacityMCPRegistrationControl
+      }
+    }
+  }
+
+  private var capacityMCPRegistrationDescription: String {
+    switch capacityMCPRegistration.status {
+    case .checking, .notConfigured, .settingUp:
+      MenuBarSettingsCopy.useCapacityInCodexDescription
+    case .configured:
+      MenuBarSettingsCopy.configuredCapacityInCodexDescription
+    case .removing:
+      MenuBarSettingsCopy.removingCapacityFromCodexDescription
+    case .removed:
+      MenuBarSettingsCopy.removedCapacityFromCodexDescription
+    case .existingRegistrationNeedsReview:
+      MenuBarSettingsCopy.existingCapacityRegistrationDescription
+    case .checkFailed:
+      MenuBarSettingsCopy.capacitySetupCheckFailedDescription
+    case .removeFailed:
+      MenuBarSettingsCopy.capacityRemovalFailedDescription
+    case .unsupportedInstallation:
+      MenuBarSettingsCopy.unsupportedCapacitySetupDescription
+    }
+  }
+
+  @ViewBuilder
+  private var capacityMCPRegistrationControl: some View {
+    switch capacityMCPRegistration.status {
+    case .checking:
+      ProgressView()
+        .controlSize(.small)
+        .accessibilityLabel("Checking Codex setup")
+    case .notConfigured, .removed:
+      Button("Set Up") {
+        capacityMCPRegistration.setUp()
+      }
+    case .settingUp:
+      ProgressView()
+        .controlSize(.small)
+        .accessibilityLabel("Setting up Capacity in Codex")
+    case .configured:
+      HStack(spacing: 8) {
+        Label("Configured", systemImage: "checkmark")
+          .foregroundStyle(.secondary)
+
+        Button("Remove") {
+          capacityMCPRegistration.remove()
+        }
+      }
+    case .removing:
+      ProgressView()
+        .controlSize(.small)
+        .accessibilityLabel("Removing Capacity from Codex")
+    case .checkFailed:
+      Button("Try Again") {
+        capacityMCPRegistration.tryAgain()
+      }
+    case .removeFailed:
+      Button("Try Again") {
+        capacityMCPRegistration.retryRemove()
+      }
+    case .existingRegistrationNeedsReview, .unsupportedInstallation:
+      EmptyView()
     }
   }
 

@@ -32,10 +32,12 @@ done
 
 /usr/bin/plutil -lint "$info_plist" >/dev/null
 /usr/bin/swift build \
+  --force-resolved-versions \
   --package-path "$repo_root" \
   --configuration "$configuration" \
   --product CodexEcho
 bin_path="$(/usr/bin/swift build \
+  --force-resolved-versions \
   --package-path "$repo_root" \
   --configuration "$configuration" \
   --show-bin-path)"

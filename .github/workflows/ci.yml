@@ -25,7 +25,7 @@ jobs:
           persist-credentials: false
 
       - name: Run tests
-        run: NSUnbufferedIO=YES /usr/bin/swift test
+        run: NSUnbufferedIO=YES /usr/bin/swift test --force-resolved-versions
 
       - name: Build local app bundle
         run: ./scripts/build_app.sh

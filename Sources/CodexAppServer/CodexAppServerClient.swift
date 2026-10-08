@@ -115,6 +115,23 @@ private enum CodexAppServerRequestSlot: Hashable {
   case rateLimits
 }
 
+public enum CodexCLIExecutableResolver {
+  public static func bundledExecutableURL(
+    codexApplicationURL: URL?
+  ) -> URL? {
+    guard let codexApplicationURL else { return nil }
+    let candidates = [
+      "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+      "Contents/Resources/codex",
+    ].map {
+      codexApplicationURL.appendingPathComponent($0, isDirectory: false)
+    }
+    return candidates.first {
+      FileManager.default.isExecutableFile(atPath: $0.path)
+    }
+  }
+}
+
 enum CodexAppServerExecutableLocation: Equatable {
   case unavailable
   case available(URL)
@@ -125,18 +142,12 @@ enum CodexAppServerExecutableLocation: Equatable {
   ) {
     if let override = environment["CODEX_EXECUTABLE"], !override.isEmpty {
       self = .available(URL(fileURLWithPath: override))
-    } else if let codexApplicationURL {
-      let candidates = [
-        "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-        "Contents/Resources/codex",
-      ].map { codexApplicationURL.appendingPathComponent($0, isDirectory: false) }
-      if let executableURL = candidates.first(where: {
-        FileManager.default.isExecutableFile(atPath: $0.path)
-      }) {
-        self = .available(executableURL)
-      } else {
-        self = .unavailable
-      }
+    } else if
+      let executableURL = CodexCLIExecutableResolver.bundledExecutableURL(
+        codexApplicationURL: codexApplicationURL
+      )
+    {
+      self = .available(executableURL)
     } else {
       self = .unavailable
     }
@@ -958,10 +969,9 @@ public final class CodexAppServerClient: @unchecked Sendable {
     let now = Date()
     latestUsageSnapshot = usage
     diagnosticsCapacityState = .available
-    usagePollingPolicy.observe(
-      remainingPercent: usage.remainingPercent,
-      at: now
-    )
+    if let remainingPercent = usage.remainingPercent {
+      usagePollingPolicy.observe(remainingPercent: remainingPercent, at: now)
+    }
     scheduleUsageResetLocked(resetsAt: usage.nextResetAt(after: now))
     emit(.usageChanged(usage))
   }
