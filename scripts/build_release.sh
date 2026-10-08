@@ -7,21 +7,9 @@ official_repository_url="https://github.com/ohida/codex-echo"
 stable_feed_url="https://updates.ohida.app/codex-echo/appcast.xml"
 immutable_download_root="https://updates.ohida.app/codex-echo/releases"
 sparkle_version="2.9.4"
-sparkle_revision="b6496a74a087257ef5e6da1c5b29a447a60f5bd7"
 mcp_sdk_version="0.12.1"
-mcp_sdk_revision="a0ae212ebf6eab5f754c3129608bc5557637e605"
-eventsource_version="1.5.1"
-eventsource_revision="86b5096ac59ab46e66bd1f6377c604bc1dab0bc2"
-swift_atomics_version="1.3.1"
-swift_atomics_revision="0442cb5a3f98ab802acb777929fdb446bda11a34"
-swift_collections_version="1.6.0"
-swift_collections_revision="a0cb0954ecb21e4e31b0070e6ed5674e8556685a"
-swift_log_version="1.15.0"
-swift_log_revision="3ffafb9722d5d918c614feb496c8789a3b59d222"
-swift_nio_version="2.101.3"
-swift_nio_revision="0b18836bd8b0162e7e17a995a3fbee20ed8f3b2b"
-swift_system_version="1.8.1"
-swift_system_revision="869129b7bf4ecc57b97d0193ad29690ca2134750"
+# Bind the complete reviewed lock, including dependencies pruned by newer SwiftPM.
+package_resolved_sha256="3cec18c797eb0d74435fbd7586ec0b1d5482b5adb6e3b0cc80c634492985f6f9"
 sparkle_archive_url="https://github.com/sparkle-project/Sparkle/releases/download/2.9.4/Sparkle-for-Swift-Package-Manager.zip"
 sparkle_archive_sha256="cb6fdbdc8884f15d62a616e79face92b08322410fd2d425edc6596ccbf4ba3b0"
 sparkle_public_key="cMXp1w6Tx8sJunwcUo2JG7vQ/qO63do4we0TpqgV34s="
@@ -38,6 +26,10 @@ sha256_file() {
 
 run_codesign() {
   /usr/bin/codesign "$@"
+}
+
+run_swift_build() {
+  /usr/bin/swift build "$@"
 }
 
 run_hdiutil() {
@@ -363,80 +355,7 @@ validate_source_package() {
   fi
   /bin/rm -f -- "$package_description"
 
-  if ! /usr/bin/jq -e \
-    --arg sparkleVersion "$sparkle_version" \
-    --arg sparkleRevision "$sparkle_revision" \
-    --arg mcpSDKVersion "$mcp_sdk_version" \
-    --arg mcpSDKRevision "$mcp_sdk_revision" \
-    --arg eventsourceVersion "$eventsource_version" \
-    --arg eventsourceRevision "$eventsource_revision" \
-    --arg swiftAtomicsVersion "$swift_atomics_version" \
-    --arg swiftAtomicsRevision "$swift_atomics_revision" \
-    --arg swiftCollectionsVersion "$swift_collections_version" \
-    --arg swiftCollectionsRevision "$swift_collections_revision" \
-    --arg swiftLogVersion "$swift_log_version" \
-    --arg swiftLogRevision "$swift_log_revision" \
-    --arg swiftNIOVersion "$swift_nio_version" \
-    --arg swiftNIORevision "$swift_nio_revision" \
-    --arg swiftSystemVersion "$swift_system_version" \
-    --arg swiftSystemRevision "$swift_system_revision" '
-      def pin($identity): .pins[] | select(.identity == $identity);
-      def matches($identity; $location; $version; $revision):
-        (pin($identity).kind == "remoteSourceControl")
-        and (pin($identity).location == $location)
-        and (pin($identity).state.version == $version)
-        and (pin($identity).state.revision == $revision);
-      (.pins | length == 8)
-      and matches(
-        "sparkle";
-        "https://github.com/sparkle-project/Sparkle";
-        $sparkleVersion;
-        $sparkleRevision
-      )
-      and matches(
-        "swift-sdk";
-        "https://github.com/modelcontextprotocol/swift-sdk";
-        $mcpSDKVersion;
-        $mcpSDKRevision
-      )
-      and matches(
-        "eventsource";
-        "https://github.com/mattt/eventsource.git";
-        $eventsourceVersion;
-        $eventsourceRevision
-      )
-      and matches(
-        "swift-atomics";
-        "https://github.com/apple/swift-atomics.git";
-        $swiftAtomicsVersion;
-        $swiftAtomicsRevision
-      )
-      and matches(
-        "swift-collections";
-        "https://github.com/apple/swift-collections.git";
-        $swiftCollectionsVersion;
-        $swiftCollectionsRevision
-      )
-      and matches(
-        "swift-log";
-        "https://github.com/apple/swift-log.git";
-        $swiftLogVersion;
-        $swiftLogRevision
-      )
-      and matches(
-        "swift-nio";
-        "https://github.com/apple/swift-nio.git";
-        $swiftNIOVersion;
-        $swiftNIORevision
-      )
-      and matches(
-        "swift-system";
-        "https://github.com/apple/swift-system.git";
-        $swiftSystemVersion;
-        $swiftSystemRevision
-      )
-    ' "$source_root/Package.resolved" >/dev/null
-  then
+  if [[ "$(sha256_file "$source_root/Package.resolved")" != "$package_resolved_sha256" ]]; then
     die "Package.resolved does not contain the reviewed dependency pins."
   fi
 }
@@ -460,14 +379,17 @@ prepare_source() {
   validate_source_package "$source_root"
   require_empty_destination "$payload_directory"
 
-  /usr/bin/swift build \
+  run_swift_build \
+    --force-resolved-versions \
     --package-path "$source_root" \
     --configuration release \
     --product CodexEcho
-  bin_path="$(/usr/bin/swift build \
+  bin_path="$(run_swift_build \
+    --force-resolved-versions \
     --package-path "$source_root" \
     --configuration release \
     --show-bin-path)"
+  validate_source_package "$source_root"
   if [[ ! -x "$bin_path/CodexEcho" ]]; then
     die "SwiftPM did not produce CodexEcho."
   fi

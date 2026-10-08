@@ -93,6 +93,82 @@ expect_source_package_rejected \
 expect_source_package_rejected \
   "MCP SDK revision mismatch" \
   "Package.resolved does not contain the reviewed dependency pins."
+
+/usr/bin/jq 'del(.pins[] | select(.identity == "swift-nio-http2"))' \
+  "$source_root/Package.resolved" > "$source_fixture/Package.resolved"
+expect_source_package_rejected \
+  "Missing optional dependency pin" \
+  "Package.resolved does not contain the reviewed dependency pins."
+
+/usr/bin/jq \
+  '(.pins[] | select(.identity == "swift-nio-http2").state.revision) = "0000000000000000000000000000000000000000"' \
+  "$source_root/Package.resolved" > "$source_fixture/Package.resolved"
+expect_source_package_rejected \
+  "Optional dependency revision mismatch" \
+  "Package.resolved does not contain the reviewed dependency pins."
+
+/usr/bin/jq \
+  '.pins += [{identity: "unreviewed-package", kind: "remoteSourceControl", location: "https://example.invalid/unreviewed-package.git", state: {revision: "0000000000000000000000000000000000000000", version: "1.0.0"}}]' \
+  "$source_root/Package.resolved" > "$source_fixture/Package.resolved"
+expect_source_package_rejected \
+  "Extra unreviewed dependency pin" \
+  "Package.resolved does not contain the reviewed dependency pins."
+
+/usr/bin/jq \
+  '(.pins[] | select(.identity == "swift-nio-http2")).identity = "unreviewed-package"' \
+  "$source_root/Package.resolved" > "$source_fixture/Package.resolved"
+expect_source_package_rejected \
+  "Unreviewed pin replacing an optional dependency" \
+  "Package.resolved does not contain the reviewed dependency pins."
+
+expect_build_lock_rewrite_rejected() {
+  local mutation_call="$1"
+  local payload="$fixture_root/Payload After Build $mutation_call"
+  local error_file="$fixture_root/source-build-error-$mutation_call.txt"
+  local calls_file="$fixture_root/source-build-calls-$mutation_call.txt"
+  local reviewed_lock="$source_root/Package.resolved"
+  /bin/cp "$reviewed_lock" "$source_fixture/Package.resolved"
+  if (
+    SOURCE_REPOSITORY="ohida/codex-echo"
+    SOURCE_REF="refs/tags/$RELEASE_TAG"
+    SOURCE_COMMIT="0123456789abcdef0123456789abcdef01234567"
+    BUILDER_COMMIT="89abcdef0123456789abcdef0123456789abcdef"
+    typeset -i build_calls=0
+    run_swift_build() {
+      if [[ " $* " != *" --force-resolved-versions "* ]]; then
+        fail_test "Swift build must use the reviewed resolved versions."
+      fi
+      build_calls=$((build_calls + 1))
+      print -r -- "$build_calls" >> "$calls_file"
+      if (( build_calls == mutation_call )); then
+        /usr/bin/jq \
+          '(.pins[] | select(.identity == "swift-nio-http2").state.revision) = "0000000000000000000000000000000000000000"' \
+          "$reviewed_lock" > "$source_fixture/Package.resolved"
+      fi
+      if [[ " $* " == *" --show-bin-path "* ]]; then
+        print -r -- "$fixture_root/Unused Bin Path"
+      fi
+    }
+    prepare_source "$source_fixture" "$payload"
+  ) > /dev/null 2> "$error_file"; then
+    fail_test "Build call $mutation_call changed the lock and produced a payload."
+  fi
+  if [[ "$(<"$error_file")" \
+    != *"Package.resolved does not contain the reviewed dependency pins."* ]]
+  then
+    fail_test "Build call $mutation_call failed for an unexpected reason: $(<"$error_file")"
+  fi
+  if [[ "$(<"$calls_file")" != $'1\n2' ]]; then
+    fail_test "Expected two forced Swift build calls before lock revalidation."
+  fi
+  if [[ -e "$payload/identity.json" \
+    || -n "$(/usr/bin/find "$payload" -mindepth 1 -print -quit)" ]]
+  then
+    fail_test "Build call $mutation_call left source payload files after lock rewrite."
+  fi
+}
+expect_build_lock_rewrite_rejected 1
+expect_build_lock_rewrite_rejected 2
 print -- "Release builder source-package allowlist tests passed."
 
 appcast_fixture="$fixture_root/appcast.xml"

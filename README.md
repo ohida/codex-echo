@@ -133,13 +133,17 @@ cache data; it never starts or replaces Echo to obtain fresher data.
 Run the public test suite with:
 
 ```sh
-swift test
+swift test --force-resolved-versions
 ```
 
+Use the resolved versions to keep the reviewed dependency graph unchanged across
+Swift toolchains.
+
 Pull requests are welcome for focused changes to the public source. Run both
-`swift test` and `./scripts/build_app.sh` before opening a pull request, and add
-or update regression tests when behavior changes. Pull-request CI uses only the
-public checkout and does not receive release credentials.
+`swift test --force-resolved-versions` and `./scripts/build_app.sh` before opening
+a pull request, and add or update regression tests when behavior changes.
+Pull-request CI uses only the public checkout and does not receive release
+credentials.
 
 Codex Echo relies on unsupported Codex desktop interfaces, so changes to those
 integration boundaries should preserve graceful failure and reconnection when
