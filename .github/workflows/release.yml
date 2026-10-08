@@ -15,5 +15,5 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    uses: ohida/codex-echo/.github/workflows/release-build.yml@f31d9d7072054a1ba5a667caf607206b16e9af1d
+    uses: ohida/codex-echo/.github/workflows/release-build.yml@f0d1cc023a830e32f8d3e1de645de10a01ea5385
     secrets: inherit
