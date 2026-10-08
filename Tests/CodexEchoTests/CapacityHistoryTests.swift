@@ -2136,7 +2136,17 @@ final class CapacityHistoryTests: XCTestCase {
     let fileURL = temporaryHistoryURL()
     defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
     let store = CapacityHistoryStore(fileURL: fileURL)
-    let recorder = CapacityHistoryRecorder(model: model, store: store)
+    let currentStore = CapacityCurrentSnapshotStore(
+      fileURL: CapacityCurrentSnapshotStore.defaultFileURL(
+        historyFileURL: fileURL
+      )
+    )
+    defer { currentStore.flushSynchronously() }
+    let recorder = CapacityHistoryRecorder(
+      model: model,
+      store: store,
+      currentSnapshotStore: currentStore
+    )
 
     appServerClient.eventHandler?(.connectionStateChanged(.running))
     appServerClient.eventHandler?(
@@ -2213,7 +2223,17 @@ final class CapacityHistoryTests: XCTestCase {
     let fileURL = temporaryHistoryURL()
     defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
     let store = CapacityHistoryStore(fileURL: fileURL)
-    let recorder = CapacityHistoryRecorder(model: model, store: store)
+    let currentStore = CapacityCurrentSnapshotStore(
+      fileURL: CapacityCurrentSnapshotStore.defaultFileURL(
+        historyFileURL: fileURL
+      )
+    )
+    defer { currentStore.flushSynchronously() }
+    let recorder = CapacityHistoryRecorder(
+      model: model,
+      store: store,
+      currentSnapshotStore: currentStore
+    )
     let fiveHourReset = Date(timeIntervalSince1970: 1_800_010_000)
     let weeklyReset = Date(timeIntervalSince1970: 1_800_600_000)
 
@@ -2272,7 +2292,17 @@ final class CapacityHistoryTests: XCTestCase {
         sessionID: UUID()
       )
     )
-    let recorder = CapacityHistoryRecorder(model: model, store: store)
+    let currentStore = CapacityCurrentSnapshotStore(
+      fileURL: CapacityCurrentSnapshotStore.defaultFileURL(
+        historyFileURL: fileURL
+      )
+    )
+    defer { currentStore.flushSynchronously() }
+    let recorder = CapacityHistoryRecorder(
+      model: model,
+      store: store,
+      currentSnapshotStore: currentStore
+    )
 
     try await recorder.clearHistory()
 

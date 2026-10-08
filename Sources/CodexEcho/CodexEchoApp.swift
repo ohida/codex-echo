@@ -1,4 +1,5 @@
 import AppKit
+import CodexAppServer
 import SwiftUI
 
 @MainActor
@@ -128,7 +129,6 @@ enum SpokenAnnouncementWindowFactory {
   }
 #endif
 
-@main
 struct CodexEchoApp: App {
   @NSApplicationDelegateAdaptor(CodexEchoAppDelegate.self)
   private var appDelegate
@@ -139,6 +139,7 @@ struct CodexEchoApp: App {
         settings: appDelegate.settings,
         launchAtLogin: appDelegate.launchAtLogin,
         updateController: appDelegate.updateController,
+        capacityMCPRegistration: appDelegate.capacityMCPRegistrationController,
         previewSpokenVoice: { voice in
           appDelegate.previewSpokenVoice(voice)
         },
@@ -205,6 +206,23 @@ final class CodexEchoAppDelegate: NSObject, NSApplicationDelegate {
     #endif
     return SparkleAppUpdateController()
   }()
+  lazy var capacityMCPRegistrationController =
+    CodexCapacityMCPRegistrationController(
+      service: CodexCapacityMCPRegistrationService(
+        codexExecutableURL: {
+          CodexCLIExecutableResolver.bundledExecutableURL(
+            codexApplicationURL: NSWorkspace.shared.urlForApplication(
+              withBundleIdentifier: CodexDesktopAppController.bundleIdentifier
+            )
+          )
+        },
+        echoExecutableURL: { Bundle.main.executableURL },
+        echoBundleURL: { Bundle.main.bundleURL },
+        applicationSupportURL: {
+          ApplicationInstanceLock.defaultFileURL().deletingLastPathComponent()
+        }
+      )
+    )
   private let userDefaults: UserDefaults
   private var model: CodexActivityModel?
   private var statusItemController: StatusItemController?
@@ -347,7 +365,11 @@ final class CodexEchoAppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     model?.stop()
-    capacityHistoryStore.flushSynchronously()
+    if let capacityHistoryRecorder {
+      capacityHistoryRecorder.prepareForTermination()
+    } else {
+      capacityHistoryStore.flushSynchronously()
+    }
   }
 
   private static func acquireApplicationInstanceLock()

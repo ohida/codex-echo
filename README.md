@@ -30,6 +30,104 @@ The result is `.build/app/Codex Echo.app`. This local build neither needs nor
 accepts release signing, notarization, update-signing, or publication
 credentials.
 
+## Connect Capacity history to Codex
+
+Codex Echo includes a local, read-only MCP server that lets Codex inspect the
+current Codex Capacity snapshot, purchased Credits, and the Capacity history
+recorded by Echo. Purchased Credits include the balance and its observation
+time, separately from earned reset credits. Purchased Credit expiry is not
+exposed by the upstream response; an unavailable balance is not treated as zero.
+The server runs as a separate STDIO process; it does not launch the menu bar UI or connect
+to `codex app-server` itself.
+
+After moving Codex Echo to an Applications folder, open
+**Codex Echo Settings → Capacity** and click **Set Up** beside
+**Use Capacity in Codex via MCP**. Echo checks the shared Codex MCP
+configuration and adds its server only when `codex-echo` is not already
+present. Restart Codex if the tools are not available immediately.
+
+For local development, or to register manually, use:
+
+```sh
+codex mcp add codex-echo -- \
+  "/Applications/Codex Echo.app/Contents/MacOS/CodexEcho" --mcp-stdio
+```
+
+Replace the executable path with the one inside `.build/app/Codex Echo.app`
+for a local build. A matching configured registration can be removed from the
+same Settings row. Echo never replaces, enables, repairs, or removes a
+same-name registration whose command or arguments no longer match Echo.
+
+Echo remains the only writer. The MCP process only reads
+`CapacityHistory/current-v1.json` and the existing `CapacityHistory/v1.jsonl`;
+it never repairs, rewrites, or migrates history. Current values refresh while
+Echo is running. History grows only while Capacity history recording is
+enabled.
+
+## Read Capacity once as JSON
+
+Run the development build directly without registering MCP:
+
+```sh
+".build/app/Codex Echo.app/Contents/MacOS/CodexEcho" --capacity-json
+```
+
+This command prints one JSON object and exits. It reuses the MCP snapshot reader,
+without opening the UI, reading history, refreshing the account, or writing files.
+It does not register MCP or require new credentials. `retrieved_at` is the read
+request time; `source.current_observed_at` and `credits.observed_at` are the actual
+observations. `source.kind` identifies the local Echo cache, and
+`source.refreshed_upstream` is false for cache-only reads. Freshness uses the same six-minute
+threshold and availability checks as MCP; it is not proof of a live server read.
+
+- `windows` contains each observed window's remaining percentage, duration, and
+  reset time when available. Missing windows are an empty array, not 100% remaining.
+- `credits.balance` preserves the exact upstream string, including `"0"`.
+  Unknown balance is null with `balance_status: "unknown"`. Purchased-credit expiry
+  is explicitly `not_provided_by_source`; it is never inferred from reset credits.
+- `reset_credits` preserves the observed count and known expiry dates, if present.
+  These dates may be incomplete. Cache-only reads report freshness as `unknown`
+  because existing snapshots do not record an independent reset-credit observation
+  time. A missing count is null, not zero. Do not recommend spending a reset from
+  this cache alone.
+- Missing or stale observations still produce JSON with exit code 0. Unreadable,
+  malformed, or unsupported snapshots produce a static `snapshot_unreadable` error
+  and exit code 1. Unknown or extra arguments produce `invalid_arguments` and exit code 64.
+
+For an explicit live observation using the existing signed-in Codex session:
+
+```sh
+".build/app/Codex Echo.app/Contents/MacOS/CodexEcho" --capacity-json --refresh
+```
+
+`--refresh` uses Echo's existing app-server client, with a 20-second deadline. It
+starts its own short-lived app-server process, waits for a usage observation, and
+stops only that child. It never starts, stops, or replaces the menu bar app. The
+client uses its ordinary read-only usage and catalog requests; no task content is
+returned by this command. It does not sign in, reset limits, buy credits, register
+MCP, or expose credentials. Failure returns a static `refresh_unavailable` or
+`refresh_timed_out` error and exit code 1, never a silent fallback to stale cache.
+
+Live output uses `source.kind: "codex_app_server_live_observation"` and
+`source.refreshed_upstream: true`. It is rendered in memory and does not overwrite
+Echo's shared cache or history, so an installed release that lacks the MCP writer
+can keep running safely. Use `--refresh` each time a current observation is needed;
+the plain command continues to read only the existing cache. When the response
+supplies reset credits, their `observed_at` records the local response receipt time,
+with `observation_source: "app_server_response_received"`; freshness is calculated
+from that timestamp. `upstream_observed_at` remains null because the server does
+not supply its own observation timestamp. Sparse updates preserve the summary's
+original receipt time rather than refreshing it. Missing fields and values without
+receipt evidence remain unknown. Reset expiry dates are separate upstream values;
+a missing observation timestamp does not mean the expiry dates are unavailable.
+
+An assistant with an already authorized way to run commands on this Mac can call
+this command and return its JSON to the requesting conversation. Local STDIO MCP
+and this command do not make a cloud endpoint available. Direct remote access
+would require a separately authorized remote service or tunnel and authentication.
+When Echo is not collecting observations, the command returns missing or stale
+cache data; it never starts or replaces Echo to obtain fresher data.
+
 ## Test and contribute
 
 Run the public test suite with:

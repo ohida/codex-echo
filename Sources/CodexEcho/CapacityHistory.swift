@@ -1147,6 +1147,7 @@ final class CapacityHistoryRecorder: ObservableObject {
 
   private let model: CodexActivityModel
   private let store: CapacityHistoryStore
+  private let currentSnapshotReducer: CapacityCurrentSnapshotReducer
   private let now: @Sendable () -> Date
   private let makeSessionID: @Sendable () -> UUID
   private let sleepForCurrentCycleExpiry:
@@ -1164,6 +1165,7 @@ final class CapacityHistoryRecorder: ObservableObject {
   init(
     model: CodexActivityModel,
     store: CapacityHistoryStore,
+    currentSnapshotStore: CapacityCurrentSnapshotStore? = nil,
     now: @escaping @Sendable () -> Date = Date.init,
     makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
     sleepForCurrentCycleExpiry: @escaping @Sendable (
@@ -1178,6 +1180,15 @@ final class CapacityHistoryRecorder: ObservableObject {
     self.makeSessionID = makeSessionID
     self.sleepForCurrentCycleExpiry = sleepForCurrentCycleExpiry
     isRecordingEnabled = model.settings.recordsCapacityHistory
+    currentSnapshotReducer = CapacityCurrentSnapshotReducer(
+      store: currentSnapshotStore ?? CapacityCurrentSnapshotStore(
+        fileURL: CapacityCurrentSnapshotStore.defaultFileURL(
+          historyFileURL: store.fileURL
+        )
+      ),
+      historyRecordingEnabled: model.settings.recordsCapacityHistory,
+      now: now()
+    )
 
     model.$appServerConnectionState
       .removeDuplicates()
@@ -1205,6 +1216,14 @@ final class CapacityHistoryRecorder: ObservableObject {
     currentCycleExpiryTask?.cancel()
   }
 
+  func prepareForTermination() {
+    cancellables.removeAll()
+    currentCycleExpiryTask?.cancel()
+    handleConnectionState(.stopped)
+    currentSnapshotReducer.flushSynchronously()
+    store.flushSynchronously()
+  }
+
   func clearHistory() async throws {
     isClearing = true
     defer { isClearing = false }
@@ -1226,7 +1245,7 @@ final class CapacityHistoryRecorder: ObservableObject {
     else { return }
     let observations = capture(
       snapshot: snapshot,
-      observedAt: now(),
+      observedAt: snapshot.windowsObservedAt ?? now(),
       recordsHistory: true
     )
     for observation in observations {
@@ -1240,6 +1259,7 @@ final class CapacityHistoryRecorder: ObservableObject {
   private func handleConnectionState(
     _ state: CodexAppServerConnectionState
   ) {
+    currentSnapshotReducer.observeConnectionState(state, observedAt: now())
     isConnected = state == .running
     for key in Array(policies.keys) {
       policies[key]?.handleConnectionState(state)
@@ -1254,6 +1274,9 @@ final class CapacityHistoryRecorder: ObservableObject {
 
   private func handleUsageSnapshot(_ snapshot: CodexUsageSnapshot?) {
     guard let snapshot else {
+      if model.appServerConnectionState == .running {
+        currentSnapshotReducer.observeUsageUnavailable(observedAt: now())
+      }
       liveRemainingPercent = nil
       liveObservedAt = nil
       liveSessionID = nil
@@ -1261,7 +1284,7 @@ final class CapacityHistoryRecorder: ObservableObject {
       receivedLiveValuesByDuration = [:]
       return
     }
-    let observedAt = now()
+    let observedAt = snapshot.windowsObservedAt ?? now()
     replaceCurrentCycleContexts(
       snapshot: snapshot,
       observedAt: observedAt
@@ -1274,6 +1297,10 @@ final class CapacityHistoryRecorder: ObservableObject {
       receivedLiveValuesByDuration = [:]
       return
     }
+    currentSnapshotReducer.observeUsageSnapshot(
+      snapshot,
+      observedAt: observedAt
+    )
     let observations = capture(
       snapshot: snapshot,
       observedAt: observedAt,
@@ -1288,6 +1315,7 @@ final class CapacityHistoryRecorder: ObservableObject {
   private func handleRecordingEnabled(_ isEnabled: Bool) {
     guard isRecordingEnabled != isEnabled else { return }
     isRecordingEnabled = isEnabled
+    currentSnapshotReducer.setHistoryRecordingEnabled(isEnabled)
     for key in Array(policies.keys) {
       policies[key]?.beginNewSession()
     }
@@ -1300,7 +1328,7 @@ final class CapacityHistoryRecorder: ObservableObject {
 
     let observations = capture(
       snapshot: snapshot,
-      observedAt: now(),
+      observedAt: snapshot.windowsObservedAt ?? now(),
       recordsHistory: true
     )
     for observation in observations {

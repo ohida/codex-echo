@@ -999,12 +999,13 @@ final class CodexAppServerClientTests: XCTestCase {
     ]
 
     XCTAssertEqual(
-      CodexUsageSnapshot.readResult(result),
+      CodexUsageSnapshot.readResult(result, observedAt: Date(timeIntervalSince1970: 1_000)),
       CodexUsageSnapshot(
         limitID: "codex",
         usedPercent: 98,
         windowDurationMinutes: 10_080,
-        resetsAt: Date(timeIntervalSince1970: 1_785_258_164)
+        resetsAt: Date(timeIntervalSince1970: 1_785_258_164),
+        windowsObservedAt: Date(timeIntervalSince1970: 1_000)
       )
     )
     XCTAssertEqual(CodexUsageSnapshot.readResult(result)?.remainingPercent, 2)
@@ -1293,7 +1294,8 @@ final class CodexAppServerClientTests: XCTestCase {
 
     XCTAssertEqual(
       read.preservingKnownResetCredits(from: previous).rateLimitResetCredits,
-      CodexRateLimitResetCredits(availableCount: 0, expirationDates: [])
+      CodexRateLimitResetCredits(availableCount: 0, expirationDates: [],
+        observedAt: read.rateLimitResetCredits?.observedAt)
     )
   }
 
@@ -1361,14 +1363,15 @@ final class CodexAppServerClientTests: XCTestCase {
         "limitId": "codex",
         "primary": ["usedPercent": 98],
       ]
-    ])
+    ], observedAt: Date(timeIntervalSince1970: 1_000))
 
     XCTAssertEqual(
       update?.mergingMissingMetadata(from: previous),
       CodexUsageSnapshot(
         usedPercent: 98,
         windowDurationMinutes: 10_080,
-        resetsAt: Date(timeIntervalSince1970: 1_785_258_164)
+        resetsAt: Date(timeIntervalSince1970: 1_785_258_164),
+        windowsObservedAt: Date(timeIntervalSince1970: 1_000)
       )
     )
   }

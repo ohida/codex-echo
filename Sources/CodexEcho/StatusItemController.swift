@@ -1885,6 +1885,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                   canCheckForUpdates: true,
                   automaticallyChecksForUpdates: true
                 ),
+                capacityMCPRegistration:
+                  CodexCapacityMCPRegistrationController(
+                    staticStatus: .notConfigured
+                  ),
                 previewSpokenVoice: { _ in },
                 openProjectCustomizationSettings: {},
                 openSpokenAnnouncementSettings: {}
