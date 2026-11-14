@@ -87,6 +87,45 @@ final class CodexCapacityJSONCommandTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: file), content)
   }
 
+  func testCachedAndLiveReadsUseTheSameIndependentResetReceipt() async throws {
+    let directory = temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = CapacityCurrentSnapshotStore(fileURL: directory.appendingPathComponent("current-v1.json"))
+    for (age, availability, freshness, reason) in [
+      (0.0, CapacityCurrentAvailabilityState.available, "fresh", "recent_response"),
+      (600.0, .available, "stale", "response_time_outside_freshness_window"),
+      (0.0, .unavailable, "stale", "source_unavailable"),
+    ] {
+      let usage = CodexUsageSnapshot(
+        usedPercent: 45, windowDurationMinutes: 300,
+        rateLimitResetCredits: .init(availableCount: 0, expirationDates: [],
+          observedAt: now.addingTimeInterval(-age)), windowsObservedAt: now
+      )
+      store.enqueue(.init(
+        revision: 1, availability: .init(state: availability, reason: nil, changedAt: now),
+        lastSuccess: .init(snapshot: usage, observedAt: now), historyRecordingEnabled: false
+      ))
+      store.flushSynchronously()
+      let before = try Data(contentsOf: store.fileURL)
+      let cached = try await read(directory: directory)
+      let resets = try XCTUnwrap(cached["reset_credits"]?.objectValue)
+      XCTAssertEqual(resets["available_count"], .int(0))
+      XCTAssertEqual(resets["observed_at"],
+        .string(ISO8601DateFormatter().string(from: now.addingTimeInterval(-age))))
+      XCTAssertEqual(resets["age_seconds"]?.intValue, Int(age))
+      XCTAssertEqual(resets["freshness"], .string(freshness))
+      XCTAssertEqual(resets["observation_source"], .string("app_server_response_received"))
+      XCTAssertEqual(resets["freshness_reason"], .string(reason))
+      XCTAssertEqual(resets["upstream_observed_at"], .null)
+      if availability == .available {
+        let live = try await CodexCapacityJSONCommand.readLive(usage: usage, now: now)
+        XCTAssertEqual(try JSONDecoder().decode(Value.self, from: live)
+          .objectValue?["reset_credits"], cached["reset_credits"])
+      }
+      XCTAssertEqual(try Data(contentsOf: store.fileURL), before)
+    }
+  }
+
   private func temporaryDirectory() -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent("CapacityJSONTests-\(UUID().uuidString)")
   }

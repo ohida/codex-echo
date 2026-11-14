@@ -157,6 +157,8 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
   public let rateLimitResetCredits: CodexRateLimitResetCredits?
   public let credits: CodexCreditsSnapshot?
   public let windowsObservedAt: Date?
+  /// Backend permission for ordinary included usage; nil means unavailable.
+  public let ordinaryUsageAllowed: Bool?
   private let includesCreditsUpdate: Bool
 
   public var primaryWindow: CodexRateLimitWindow? {
@@ -217,7 +219,8 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     resetsAt: Date? = nil,
     rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
     credits: CodexCreditsSnapshot? = nil,
-    windowsObservedAt: Date? = nil
+    windowsObservedAt: Date? = nil,
+    ordinaryUsageAllowed: Bool? = nil
   ) {
     self.limitID = limitID
     windows = [
@@ -231,6 +234,7 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     self.rateLimitResetCredits = rateLimitResetCredits
     self.credits = credits
     self.windowsObservedAt = windowsObservedAt
+    self.ordinaryUsageAllowed = ordinaryUsageAllowed
     includesCreditsUpdate = credits != nil
   }
 
@@ -239,13 +243,15 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     windows: [CodexRateLimitWindow],
     rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
     credits: CodexCreditsSnapshot? = nil,
-    windowsObservedAt: Date? = nil
+    windowsObservedAt: Date? = nil,
+    ordinaryUsageAllowed: Bool? = nil
   ) {
     self.limitID = limitID
     self.windows = windows
     self.rateLimitResetCredits = rateLimitResetCredits
     self.credits = credits
     self.windowsObservedAt = windowsObservedAt
+    self.ordinaryUsageAllowed = ordinaryUsageAllowed
     includesCreditsUpdate = credits != nil
   }
 
@@ -255,14 +261,16 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     secondaryWindow: CodexRateLimitWindow?,
     rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
     credits: CodexCreditsSnapshot? = nil,
-    windowsObservedAt: Date? = nil
+    windowsObservedAt: Date? = nil,
+    ordinaryUsageAllowed: Bool? = nil
   ) {
     self.init(
       limitID: limitID,
       windows: [primaryWindow, secondaryWindow].compactMap { $0 },
       rateLimitResetCredits: rateLimitResetCredits,
       credits: credits,
-      windowsObservedAt: windowsObservedAt
+      windowsObservedAt: windowsObservedAt,
+      ordinaryUsageAllowed: ordinaryUsageAllowed
     )
   }
 
@@ -270,6 +278,10 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     _ result: [String: Any],
     observedAt: Date = Date()
   ) -> Self? {
+    let ordinaryUsageAllowed = (result["ordinaryUsageAllowed"] as? NSNumber)
+      .flatMap { value -> Bool? in
+        CFGetTypeID(value) == CFBooleanGetTypeID() ? value.boolValue : nil
+      }
     let resetCredits = CodexRateLimitResetCredits(
       object: result["rateLimitResetCredits"],
       observedAt: observedAt
@@ -279,7 +291,8 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
       let snapshot = Self(
         rateLimitObject: mainBucket,
         rateLimitResetCredits: resetCredits,
-        observedAt: observedAt
+        observedAt: observedAt,
+        ordinaryUsageAllowed: ordinaryUsageAllowed
       )
     {
       return snapshot
@@ -290,7 +303,8 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     return Self(
       rateLimitObject: historicalBucket,
       rateLimitResetCredits: resetCredits,
-      observedAt: observedAt
+      observedAt: observedAt,
+      ordinaryUsageAllowed: ordinaryUsageAllowed
     )
   }
 
@@ -325,6 +339,7 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
       rateLimitResetCredits: rateLimitResetCredits ?? previous.rateLimitResetCredits,
       credits: includesCreditsUpdate ? credits : previous.credits,
       windowsObservedAt: windows.isEmpty ? previous.windowsObservedAt : windowsObservedAt,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       includesCreditsUpdate: includesCreditsUpdate
     )
   }
@@ -343,6 +358,7 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
       rateLimitResetCredits: previousResetCredits,
       credits: credits,
       windowsObservedAt: windowsObservedAt,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       includesCreditsUpdate: includesCreditsUpdate
     )
   }
@@ -350,7 +366,8 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
   private init?(
     rateLimitObject: [String: Any],
     rateLimitResetCredits: CodexRateLimitResetCredits? = nil,
-    observedAt: Date
+    observedAt: Date,
+    ordinaryUsageAllowed: Bool? = nil
   ) {
     let observedLimitID = rateLimitObject["limitId"] as? String
     guard observedLimitID == nil || observedLimitID == Self.mainLimitID else {
@@ -391,6 +408,7 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
       rateLimitResetCredits: rateLimitResetCredits,
       credits: credits,
       windowsObservedAt: windows.isEmpty ? nil : observedAt,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       includesCreditsUpdate: rateLimitObject["credits"] != nil
     )
   }
@@ -401,6 +419,7 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     rateLimitResetCredits: CodexRateLimitResetCredits?,
     credits: CodexCreditsSnapshot?,
     windowsObservedAt: Date?,
+    ordinaryUsageAllowed: Bool?,
     includesCreditsUpdate: Bool
   ) {
     self.limitID = limitID
@@ -408,6 +427,7 @@ public struct CodexUsageSnapshot: Equatable, Sendable {
     self.rateLimitResetCredits = rateLimitResetCredits
     self.credits = credits
     self.windowsObservedAt = windowsObservedAt
+    self.ordinaryUsageAllowed = ordinaryUsageAllowed
     self.includesCreditsUpdate = includesCreditsUpdate
   }
 }

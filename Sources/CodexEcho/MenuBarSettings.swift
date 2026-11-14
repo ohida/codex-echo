@@ -88,11 +88,12 @@ struct CapacityMenuItemPresentation: Equatable {
   let title: String
 
   static func make(
-    remainingPercent: Int?
+    remainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> Self {
     return Self(
       title: remainingPercent.map {
-        "\(MenuBarSettingsCopy.codexCapacityMenuTitle) (\($0)%)"
+        "\(MenuBarSettingsCopy.codexCapacityMenuTitle) (\(CapacityRemainingPresentation($0, ordinaryUsageAllowed: ordinaryUsageAllowed).percentText))"
       } ?? MenuBarSettingsCopy.codexCapacityMenuTitle
     )
   }

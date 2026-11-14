@@ -176,6 +176,82 @@ final class StatusItemAccessibilityControllerTests: XCTestCase {
     XCTAssertEqual(actions, [.showContextMenu])
   }
 
+  func testRoundedZeroCapacityDoesNotAnnounceZeroRemaining() throws {
+    let harness = makeHarness()
+    let controller = StatusItemAccessibilityController()
+    controller.update(
+      parent: harness.parent,
+      coordinateView: harness.coordinateView,
+      snapshot: .init(
+        tasks: [],
+        overflowCount: 0,
+        overflowAttentionCount: 0,
+        overflowUnreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        showsHealth: false,
+        statusLabel: "Codex Tasks"
+      ),
+      onAction: { _ in true }
+    )
+    let children = try accessibilityChildren(of: harness.parent)
+    XCTAssertEqual(
+      children[1].accessibilityValue() as? String,
+      "less than 1 percent remaining"
+    )
+  }
+
+  func testAuthoritativeZeroCapacityAnnouncesZeroAndUsesBadgeWidth() throws {
+    let harness = makeHarness()
+    let controller = StatusItemAccessibilityController()
+    controller.update(
+      parent: harness.parent,
+      coordinateView: harness.coordinateView,
+      snapshot: .init(
+        tasks: [],
+        overflowCount: 0,
+        overflowAttentionCount: 0,
+        overflowUnreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        showsHealth: false,
+        statusLabel: "Codex Tasks",
+        ordinaryUsageAllowed: false
+      ),
+      onAction: { _ in true }
+    )
+    let children = try accessibilityChildren(of: harness.parent)
+    XCTAssertEqual(children[1].accessibilityValue() as? String, "0 percent remaining")
+    XCTAssertEqual(
+      children[1].accessibilityFrame().width,
+      WorkerCrewLayout.summaryWidth(
+        overflowCount: 0,
+        capacityRemainingPercent: 0,
+        ordinaryUsageAllowed: false
+      ),
+      accuracy: 0.5
+    )
+
+    controller.update(
+      parent: harness.parent,
+      coordinateView: harness.coordinateView,
+      snapshot: .init(
+        tasks: [],
+        overflowCount: 0,
+        overflowAttentionCount: 0,
+        overflowUnreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        showsHealth: false,
+        statusLabel: "Codex Tasks",
+        ordinaryUsageAllowed: true
+      ),
+      onAction: { _ in true }
+    )
+    let allowedChildren = try accessibilityChildren(of: harness.parent)
+    XCTAssertEqual(
+      allowedChildren[1].accessibilityValue() as? String,
+      "less than 1 percent remaining"
+    )
+  }
+
   private func populatedSnapshot() -> StatusItemAccessibilityController.Snapshot {
     StatusItemAccessibilityController.Snapshot(
       tasks: [

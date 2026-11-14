@@ -102,6 +102,7 @@ final class StatusItemGestureController: NSObject, NSGestureRecognizerDelegate {
     let overflowCount: Int
     let capacityRemainingPercent: Int?
     let taskOpenMouseButton: TaskOpenMouseButton
+    var ordinaryUsageAllowed: Bool? = nil
   }
 
   enum Action: Equatable {
@@ -366,7 +367,8 @@ final class StatusItemGestureController: NSObject, NSGestureRecognizerDelegate {
       at: point.x,
       displayedCrewCount: snapshot.taskIDs.count,
       overflowCount: snapshot.overflowCount,
-      capacityRemainingPercent: snapshot.capacityRemainingPercent
+      capacityRemainingPercent: snapshot.capacityRemainingPercent,
+      ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed
     ) {
     case .crew(let index):
       return .task(snapshot.taskIDs[index])

@@ -57,11 +57,13 @@ extension UsageAnnouncementPolicy {
   fileprivate static func copy(
     previousRemainingPercent: Int?,
     remainingPercent: Int,
+    ordinaryUsageAllowed: Bool? = nil,
     level: TestAnnouncementMode
   ) -> String? {
     announcement(
       previousRemainingPercent: previousRemainingPercent,
       remainingPercent: remainingPercent,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       delivery: testDelivery(level)
     )?.text
   }
@@ -69,11 +71,13 @@ extension UsageAnnouncementPolicy {
   fileprivate static func announcement(
     previousRemainingPercent: Int?,
     remainingPercent: Int,
+    ordinaryUsageAllowed: Bool? = nil,
     level: TestAnnouncementMode
   ) -> SpokenUpdateAnnouncement? {
     announcement(
       previousRemainingPercent: previousRemainingPercent,
       remainingPercent: remainingPercent,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       delivery: testDelivery(level)
     )
   }
@@ -137,6 +141,148 @@ extension SpokenUpdateAnnouncer {
 }
 
 final class SpokenUpdateTests: XCTestCase {
+  func testZeroRemainingCapacityCopyReportsRoundedObservation() {
+    let expected = "Codex capacity, less than 1 percent remaining."
+    XCTAssertEqual(
+      SpokenAnnouncementEvent.usageDepleted.announcementText,
+      "Codex capacity depleted."
+    )
+    XCTAssertEqual(SpokenUpdateCopy.startupCapacity(remainingPercent: 0), expected)
+    XCTAssertEqual(
+      SpokenUpdateCopy.startupCapacity(remainingPercent: 0, ordinaryUsageAllowed: true),
+      expected
+    )
+    XCTAssertEqual(
+      SpokenUpdateCopy.startupCapacity(remainingPercent: 0, ordinaryUsageAllowed: false),
+      "Codex capacity depleted."
+    )
+    XCTAssertEqual(
+      SpokenUpdateCopy.startupStatus(
+        observedRunningTaskCount: 1,
+        remainingPercent: 0,
+        information: [.activeTasks, .codexCapacity]
+      ),
+      "Codex Echo online. \(expected) One active task signal detected."
+    )
+
+    let delivery = SpokenAnnouncementDelivery(isEnabled: true, configuration: .defaults)
+    let crossing = UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 1,
+      remainingPercent: 0,
+      delivery: delivery
+    )
+    XCTAssertNil(crossing)
+    let confirmedCrossing = UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 1,
+      remainingPercent: 0,
+      ordinaryUsageAllowed: false,
+      delivery: delivery
+    )
+    XCTAssertEqual(confirmedCrossing?.event, .usageDepleted)
+    XCTAssertEqual(confirmedCrossing?.text, "Codex capacity depleted.")
+  }
+
+  func testEqualZeroPermissionTransitionsOnlyAnnounceConfirmedChanges() {
+    let delivery = testDelivery(.allActivity)
+    XCTAssertNil(UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 0,
+      previousOrdinaryUsageAllowed: false,
+      remainingPercent: 0,
+      ordinaryUsageAllowed: nil,
+      delivery: delivery
+    ))
+    XCTAssertNil(UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 0,
+      previousOrdinaryUsageAllowed: false,
+      remainingPercent: 0,
+      ordinaryUsageAllowed: false,
+      delivery: delivery
+    ))
+    let restored = UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 0,
+      previousOrdinaryUsageAllowed: false,
+      remainingPercent: 0,
+      ordinaryUsageAllowed: true,
+      delivery: delivery
+    )
+    XCTAssertEqual(restored?.event, .usageOnePercent)
+    XCTAssertEqual(restored?.text, "Codex capacity, less than 1 percent remaining.")
+    let depleted = UsageAnnouncementPolicy.announcement(
+      previousRemainingPercent: 0,
+      previousOrdinaryUsageAllowed: true,
+      remainingPercent: 0,
+      ordinaryUsageAllowed: false,
+      delivery: delivery
+    )
+    XCTAssertEqual(depleted?.event, .usageDepleted)
+    XCTAssertEqual(depleted?.text, "Codex capacity depleted.")
+  }
+
+  @MainActor
+  func testSparseZeroDoesNotReplayDepletionAfterPermissionReturns() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    let delivery = testDelivery(.allActivity)
+    announcer.updateDelivery(delivery)
+    announcer.observeUsage(remainingPercent: 1, delivery: delivery)
+    announcer.completeHydration(SpokenUpdateStartupSnapshot(
+      knownTaskIDs: [], observedRunningTaskCount: 0
+    ))
+    announcer.observeUsage(
+      remainingPercent: 0, ordinaryUsageAllowed: false, delivery: delivery
+    )
+    announcer.observeUsage(remainingPercent: 0, delivery: delivery)
+    announcer.observeUsage(
+      remainingPercent: 0, ordinaryUsageAllowed: false, delivery: delivery
+    )
+    XCTAssertEqual(speaker.spokenTexts, ["Codex capacity depleted."])
+  }
+
+  @MainActor
+  func testDepletionAfterSparsePermissionAndSettingsChangeSpeaksOnce() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    let enabled = testDelivery(.allActivity)
+    let disabled = SpokenAnnouncementDelivery(isEnabled: false, configuration: .defaults)
+    announcer.updateDelivery(enabled)
+    announcer.observeUsage(remainingPercent: 1, delivery: enabled)
+    announcer.completeHydration(SpokenUpdateStartupSnapshot(
+      knownTaskIDs: [], observedRunningTaskCount: 0
+    ))
+    announcer.observeUsage(
+      remainingPercent: 0, ordinaryUsageAllowed: true, delivery: enabled
+    )
+    announcer.observeUsage(remainingPercent: 0, delivery: enabled)
+    announcer.observeUsage(
+      remainingPercent: 0, ordinaryUsageAllowed: false, delivery: disabled
+    )
+    announcer.updateDelivery(enabled)
+    announcer.observeUsage(
+      remainingPercent: 0, ordinaryUsageAllowed: false, delivery: enabled
+    )
+    XCTAssertEqual(speaker.spokenTexts, [
+      "Codex capacity, less than 1 percent remaining.",
+    ])
+  }
+
+  @MainActor
+  func testStartupDoesNotReusePermissionAfterCapacitySnapshotDisappears() {
+    let speaker = SpokenUpdateSpeakerSpy()
+    let announcer = SpokenUpdateAnnouncer(speaker: speaker)
+    let delivery = testDelivery(.allActivity, speaksAtStartup: true)
+    announcer.updateDelivery(delivery)
+    announcer.observeUsage(
+      remainingPercent: 0, ordinaryUsageAllowed: false, delivery: delivery
+    )
+    announcer.observeUsage(remainingPercent: nil, delivery: delivery)
+    announcer.completeHydration(SpokenUpdateStartupSnapshot(
+      knownTaskIDs: [], observedRunningTaskCount: 0
+    ))
+    XCTAssertEqual(speaker.spokenTexts, [
+      "Codex Echo online. Codex capacity, less than 1 percent remaining."
+    ])
+  }
+
   func testEveryEventKeepsSpeakAlertSoundAndMasterIndependent() {
     for event in SpokenAnnouncementEvent.allCases {
       for speaks in [false, true] {
@@ -159,7 +305,9 @@ final class SpokenUpdateTests: XCTestCase {
       for remaining in 0...100 {
         let result = UsageAnnouncementPolicy.announcement(
           previousRemainingPercent: previous,
+          previousOrdinaryUsageAllowed: false,
           remainingPercent: remaining,
+          ordinaryUsageAllowed: false,
           delivery: delivery
         )
         if previous > 0, remaining == 0 {
@@ -191,11 +339,14 @@ final class SpokenUpdateTests: XCTestCase {
       let result = UsageAnnouncementPolicy.announcement(
         previousRemainingPercent: 30,
         remainingPercent: 0,
+        ordinaryUsageAllowed: false,
         delivery: SpokenAnnouncementDelivery(isEnabled: true, configuration: configuration)
       )
       XCTAssertEqual(
         result?.event, events.enumerated().first { mask & (1 << $0.offset) != 0 }?.element)
-      if result != nil { XCTAssertEqual(result?.text, "Codex capacity depleted.") }
+      if result != nil {
+        XCTAssertEqual(result?.text, "Codex capacity depleted.")
+      }
     }
   }
 
@@ -398,7 +549,7 @@ final class SpokenUpdateTests: XCTestCase {
     )
     XCTAssertEqual(
       SpokenUpdateCopy.startupCapacity(remainingPercent: 0),
-      "Codex capacity depleted."
+      "Codex capacity, less than 1 percent remaining."
     )
   }
 
@@ -672,6 +823,7 @@ final class SpokenUpdateTests: XCTestCase {
       UsageAnnouncementPolicy.copy(
         previousRemainingPercent: 1,
         remainingPercent: 0,
+        ordinaryUsageAllowed: false,
         level: .keyEvents
       ),
       "Codex capacity depleted."
@@ -707,6 +859,7 @@ final class SpokenUpdateTests: XCTestCase {
       UsageAnnouncementPolicy.announcement(
         previousRemainingPercent: 1,
         remainingPercent: 0,
+        ordinaryUsageAllowed: false,
         level: .keyEvents
       )?.cue,
       .attention
@@ -979,12 +1132,12 @@ final class SpokenUpdateTests: XCTestCase {
       [
         "Codex Echo online. Codex capacity, 2 percent remaining.",
         "Codex capacity, 1 percent remaining.",
-        "Codex capacity depleted.",
+        "Codex capacity, less than 1 percent remaining.",
       ]
     )
     XCTAssertEqual(speaker.spokenChannels, [.startup, .system, .system])
     XCTAssertEqual(speaker.spokenVoices, [.defaultVoice, .defaultVoice, .defaultVoice])
-    XCTAssertEqual(speaker.spokenCues, [.attention, .attention, .attention])
+    XCTAssertEqual(speaker.spokenCues, [.attention, .attention, .none])
   }
 
   @MainActor

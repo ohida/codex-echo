@@ -108,7 +108,8 @@ struct CrewSummaryPeekPresentation: Equatable {
     attentionCount: Int,
     unreadCompletionCount: Int,
     capacityRemainingPercent: Int?,
-    resetDescription: String?
+    resetDescription: String?,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> Self? {
     guard overflowCount > 0 || capacityRemainingPercent != nil else { return nil }
 
@@ -120,7 +121,8 @@ struct CrewSummaryPeekPresentation: Equatable {
       detailLines.append(overflowDetail)
     }
     if let capacityRemainingPercent {
-      let remainingDescription = "\(capacityRemainingPercent)% remaining"
+      let remainingDescription =
+        "\(CapacityRemainingPresentation(capacityRemainingPercent, ordinaryUsageAllowed: ordinaryUsageAllowed).percentText) remaining"
       detailLines.append(
         overflowCount > 0
           ? "Codex Capacity · \(remainingDescription)"

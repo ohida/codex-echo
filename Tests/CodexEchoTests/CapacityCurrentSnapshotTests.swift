@@ -40,7 +40,8 @@ final class CapacityCurrentSnapshotTests: XCTestCase {
         ],
         resetCredits: CapacityCurrentResetCredits(
           availableCount: 1,
-          expirationDates: [expiration]
+          expirationDates: [expiration],
+          observedAt: observedAt.addingTimeInterval(-600)
         ),
         credits: CapacityCurrentCredits(
           credits: CodexCreditsSnapshot(
@@ -71,6 +72,8 @@ final class CapacityCurrentSnapshotTests: XCTestCase {
     XCTAssertEqual(windows.first?["slot"] as? String, "primary")
     XCTAssertEqual(windows.first?["window_duration_minutes"] as? Int, 300)
     XCTAssertEqual(windows.first?["remaining_percent"] as? Int, 57)
+    let resets = try XCTUnwrap(lastSuccess["reset_credits"] as? [String: Any])
+    XCTAssertEqual(resets["observed_at"] as? String, "2027-01-15T07:50:00Z")
     let credits = try XCTUnwrap(lastSuccess["credits"] as? [String: Any])
     XCTAssertEqual(credits["balance"] as? String, "62500.012300")
     XCTAssertEqual(credits["has_credits"] as? Bool, true)
@@ -89,6 +92,21 @@ final class CapacityCurrentSnapshotTests: XCTestCase {
     XCTAssertNil(
       try decoder.decode(CapacityCurrentSnapshot.self, from: legacyData).lastSuccess?.credits
     )
+
+    for legacyTime in [nil, NSNull()] as [Any?] {
+      var legacyResets = resets
+      legacyResets["observed_at"] = legacyTime
+      legacyLastSuccess["reset_credits"] = legacyResets
+      legacyObject["last_success"] = legacyLastSuccess
+      let decoded = try decoder.decode(
+        CapacityCurrentSnapshot.self,
+        from: JSONSerialization.data(withJSONObject: legacyObject)
+      )
+      XCTAssertNil(decoded.lastSuccess?.resetCredits?.observedAt)
+      XCTAssertEqual(decoded.lastSuccess?.resetCredits?.availableCount, 1)
+      XCTAssertEqual(decoded.lastSuccess?.resetCredits?.expirationDates, [expiration])
+      XCTAssertEqual(decoded.lastSuccess?.observedAt, observedAt)
+    }
   }
 
   @MainActor
@@ -144,7 +162,8 @@ final class CapacityCurrentSnapshotTests: XCTestCase {
       ),
       rateLimitResetCredits: CodexRateLimitResetCredits(
         availableCount: 1,
-        expirationDates: [observedAt.addingTimeInterval(24 * 60 * 60)]
+        expirationDates: [observedAt.addingTimeInterval(24 * 60 * 60)],
+        observedAt: initialDate
       ),
       credits: CodexCreditsSnapshot(
         balance: "62500", hasCredits: true, unlimited: false,
@@ -172,6 +191,7 @@ final class CapacityCurrentSnapshotTests: XCTestCase {
       1
     )
     XCTAssertFalse(persisted.historyRecordingEnabled)
+    XCTAssertEqual(persisted.lastSuccess?.resetCredits?.observedAt, initialDate)
     XCTAssertEqual(persisted.lastSuccess?.credits?.balance, "62500")
     XCTAssertEqual(persisted.lastSuccess?.credits?.observedAt, initialDate)
   }

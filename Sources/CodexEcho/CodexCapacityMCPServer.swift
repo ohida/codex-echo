@@ -609,15 +609,33 @@ enum CodexCapacityMCPServer {
       ]),
       "reset_credits": .object([
         "type": .string("object"),
+        "description": .string(
+          "Saved resets with an independent local response receipt time, not an "
+            + "upstream timestamp. Check freshness separately from Capacity windows. "
+            + "Older summaries have null observation time and unknown freshness; "
+            + "an absent summary means unknown, not zero. Expiry dates may be incomplete."
+        ),
         "properties": .object([
           "available_count": .object(["type": .string("integer")]),
           "expiration_dates": .object([
             "type": .string("array"),
             "items": dateTimeSchema,
           ]),
+          "observed_at": .object([
+            "type": .array([.string("string"), .string("null")]),
+            "format": .string("date-time"),
+          ]),
+          "age_seconds": .object([
+            "type": .array([.string("number"), .string("null")]),
+            "minimum": .int(0),
+          ]),
+          "freshness": .object([
+            "enum": .array([.string("fresh"), .string("stale"), .string("unknown")])
+          ]),
         ]),
         "required": .array([
-          .string("available_count"), .string("expiration_dates")
+          .string("available_count"), .string("expiration_dates"),
+          .string("observed_at"), .string("age_seconds"), .string("freshness"),
         ]),
         "additionalProperties": .bool(false),
       ]),

@@ -694,6 +694,9 @@ final class CodexActivityModel: ObservableObject {
           "CODEX_ECHO_DEBUG_USAGE_REMAINING_PERCENT"
         ].flatMap(Int.init) {
           let now = Date()
+          let ordinaryUsageAllowed = ProcessInfo.processInfo.environment[
+            "CODEX_ECHO_DEBUG_ORDINARY_USAGE_ALLOWED"
+          ].flatMap(Bool.init)
           let availableResetCount = ProcessInfo.processInfo.environment[
             "CODEX_ECHO_DEBUG_AVAILABLE_RESETS"
           ].flatMap(Int.init)
@@ -732,14 +735,16 @@ final class CodexActivityModel: ObservableObject {
                 windowDurationMinutes: 10_080,
                 resetsAt: now.addingTimeInterval(4 * 24 * 60 * 60)
               ),
-              rateLimitResetCredits: rateLimitResetCredits
+              rateLimitResetCredits: rateLimitResetCredits,
+              ordinaryUsageAllowed: ordinaryUsageAllowed
             )
           } else {
             codexUsageSnapshot = CodexUsageSnapshot(
               usedPercent: 100 - remainingPercent,
               windowDurationMinutes: 10_080,
               resetsAt: now.addingTimeInterval(4 * 24 * 60 * 60),
-              rateLimitResetCredits: rateLimitResetCredits
+              rateLimitResetCredits: rateLimitResetCredits,
+              ordinaryUsageAllowed: ordinaryUsageAllowed
             )
           }
         }

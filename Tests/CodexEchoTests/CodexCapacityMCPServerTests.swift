@@ -175,6 +175,8 @@ final class CodexCapacityMCPServerTests: XCTestCase {
       availability: .init(state: .available, reason: nil, changedAt: observedAt),
       lastSuccess: .init(snapshot: .init(
         usedPercent: 45,
+        rateLimitResetCredits: .init(availableCount: 2, expirationDates: [],
+          observedAt: observedAt.addingTimeInterval(-600)),
         credits: .init(balance: "62500.25", hasCredits: true, unlimited: false,
           observedAt: observedAt)
       ), observedAt: observedAt),
@@ -258,6 +260,11 @@ final class CodexCapacityMCPServerTests: XCTestCase {
     XCTAssertEqual(credits["has_credits"] as? Bool, true)
     XCTAssertEqual(credits["unlimited"] as? Bool, false)
     XCTAssertEqual(credits["freshness"] as? String, "fresh")
+    let resets = try XCTUnwrap(structured?["reset_credits"] as? [String: Any])
+    XCTAssertEqual(resets["available_count"] as? Int, 2)
+    XCTAssertEqual(resets["observed_at"] as? String,
+      ISO8601DateFormatter().string(from: observedAt.addingTimeInterval(-600)))
+    XCTAssertEqual(resets["freshness"] as? String, "stale")
     XCTAssertTrue(process.isRunning)
 
     try writeJSONLine(

@@ -1532,6 +1532,145 @@ final class StatusItemTaskPolicyTests: XCTestCase {
     )
   }
 
+  @MainActor
+  func testRoundedZeroCapacityDoesNotClaimTheAccountIsDepleted() throws {
+    XCTAssertEqual(
+      CapacityMenuItemPresentation.make(remainingPercent: 0).title,
+      "Codex Capacity (<1%)"
+    )
+    let summary = try XCTUnwrap(
+      CrewSummaryPeekPresentation.make(
+        overflowCount: 0,
+        attentionCount: 0,
+        unreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        resetDescription: nil
+      )
+    )
+    XCTAssertEqual(summary.detailLines, ["<1% remaining"])
+    XCTAssertEqual(
+      CrewSummaryAccessibility.label(
+        overflowCount: 0,
+        attentionCount: 0,
+        unreadCompletionCount: 0,
+        capacityRemainingPercent: 0
+      ),
+      "Codex capacity less than 1 percent remaining"
+    )
+    XCTAssertGreaterThan(
+      WorkerCrewLayout.summaryWidth(overflowCount: 0, capacityRemainingPercent: 0),
+      WorkerCrewLayout.summaryWidth(overflowCount: 0, capacityRemainingPercent: 1)
+    )
+    for overflowCount in [0, 3] {
+      let badge = NSHostingView(
+        rootView: CrewSummaryBadge(
+          overflowCount: overflowCount,
+          unreadCompletionCount: 0,
+          attentionCount: 0,
+          capacityRemainingPercent: 0,
+          phase: 0,
+          reduceMotion: true
+        )
+      )
+      badge.layoutSubtreeIfNeeded()
+      XCTAssertEqual(
+        badge.fittingSize.width,
+        WorkerCrewLayout.summaryWidth(
+          overflowCount: overflowCount,
+          capacityRemainingPercent: 0
+        ),
+        accuracy: 0.5
+      )
+    }
+  }
+
+  @MainActor
+  func testAuthoritativeZeroCapacityUsesZeroAcrossMenuHoverAccessibilityAndBadge() throws {
+    XCTAssertEqual(
+      CapacityMenuItemPresentation.make(
+        remainingPercent: 0,
+        ordinaryUsageAllowed: false
+      ).title,
+      "Codex Capacity (0%)"
+    )
+    XCTAssertEqual(
+      CapacityMenuItemPresentation.make(
+        remainingPercent: 0,
+        ordinaryUsageAllowed: true
+      ).title,
+      "Codex Capacity (<1%)"
+    )
+    let summary = try XCTUnwrap(
+      CrewSummaryPeekPresentation.make(
+        overflowCount: 0,
+        attentionCount: 0,
+        unreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        resetDescription: nil,
+        ordinaryUsageAllowed: false
+      )
+    )
+    XCTAssertEqual(summary.detailLines, ["0% remaining"])
+    let allowedSummary = try XCTUnwrap(
+      CrewSummaryPeekPresentation.make(
+        overflowCount: 0,
+        attentionCount: 0,
+        unreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        resetDescription: nil,
+        ordinaryUsageAllowed: true
+      )
+    )
+    XCTAssertEqual(allowedSummary.detailLines, ["<1% remaining"])
+    XCTAssertEqual(
+      CrewSummaryAccessibility.label(
+        overflowCount: 2,
+        attentionCount: 0,
+        unreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        ordinaryUsageAllowed: false
+      ),
+      "2 more tasks, Codex capacity 0 percent remaining"
+    )
+    XCTAssertEqual(
+      CrewSummaryAccessibility.label(
+        overflowCount: 0,
+        attentionCount: 0,
+        unreadCompletionCount: 0,
+        capacityRemainingPercent: 0,
+        ordinaryUsageAllowed: true
+      ),
+      "Codex capacity less than 1 percent remaining"
+    )
+    for overflowCount in [0, 3] {
+      let badge = NSHostingView(
+        rootView: CrewSummaryBadge(
+          overflowCount: overflowCount,
+          unreadCompletionCount: 0,
+          attentionCount: 0,
+          capacityRemainingPercent: 0,
+          ordinaryUsageAllowed: false,
+          phase: 0,
+          reduceMotion: true
+        )
+      )
+      badge.layoutSubtreeIfNeeded()
+      let width = WorkerCrewLayout.summaryWidth(
+        overflowCount: overflowCount,
+        capacityRemainingPercent: 0,
+        ordinaryUsageAllowed: false
+      )
+      XCTAssertEqual(badge.fittingSize.width, width, accuracy: 0.5)
+      let range = try XCTUnwrap(WorkerCrewLayout.summaryRange(
+        displayedCrewCount: 1,
+        overflowCount: overflowCount,
+        capacityRemainingPercent: 0,
+        ordinaryUsageAllowed: false
+      ))
+      XCTAssertEqual(range.upperBound - range.lowerBound, width, accuracy: 0.5)
+    }
+  }
+
   func testAttentionStateAndOverflowAccessibilityStayConsistent() {
     XCTAssertTrue(CodexTaskActivityState.needsApproval.requiresAttention)
     XCTAssertTrue(CodexTaskActivityState.needsInput.requiresAttention)
