@@ -829,12 +829,14 @@ public final class CodexIPCClient: @unchecked Sendable {
     }
     guard method == "thread-stream-state-changed" else { return }
     let version = (message["version"] as? NSNumber)?.intValue ?? 0
-    guard version == 11 else {
-      let reason = "thread-stream-state-changed version \(version), expected 11"
+    // Version 13 preserves the snapshot and patch fields consumed here; its
+    // additional text-change acknowledgements are not needed by this reader.
+    guard version == 11 || version == 13 else {
+      let reason = "thread-stream-state-changed version \(version), expected 13"
       diagnosticsState = .incompatible
       diagnosticsLastFailure = CodexIPCDiagnosticsFailure(
         phase: .streamVersion,
-        kind: .unsupportedVersion(actual: version, expected: 11)
+        kind: .unsupportedVersion(actual: version, expected: 13)
       )
       emit(.connectionStateChanged(.incompatible(reason: reason)))
       return
