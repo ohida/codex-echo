@@ -89,7 +89,7 @@ struct CodexIPCQueuedFollowUpsChange: Equatable, Sendable {
   ) {
     guard message["method"] as? String == "thread-queued-followups-changed",
       let version = (message["version"] as? NSNumber)?.intValue,
-      [1, 2].contains(version),
+      [1, 2, 3].contains(version),
       let params = message["params"] as? [String: Any],
       version == 1 || params["hostId"] as? String == "local",
       let conversationID = params["conversationId"] as? String,

@@ -55,56 +55,60 @@ final class CodexIPCQueuedFollowUpsTests: XCTestCase {
     )
   }
 
-  func testVersionTwoProjectsOnlyTheLocalSubscribedQueueCount() {
-    for count in [0, 2] {
-      let message: [String: Any] = [
-        "method": "thread-queued-followups-changed",
-        "version": 2,
-        "params": [
-          "hostId": "local",
-          "conversationId": "thread-1",
-          "messages": Array(repeating: ["text": "Ignored content"], count: count),
-        ],
-      ]
+  func testHostScopedVersionsProjectOnlyTheLocalSubscribedQueueCount() {
+    for version in [2, 3] {
+      for count in [0, 2] {
+        let message: [String: Any] = [
+          "method": "thread-queued-followups-changed",
+          "version": version,
+          "params": [
+            "hostId": "local",
+            "conversationId": "thread-1",
+            "messages": Array(repeating: ["text": "Ignored content"], count: count),
+          ],
+        ]
 
-      XCTAssertEqual(
-        CodexIPCQueuedFollowUpsChange(
-          broadcast: message,
-          subscribedConversationIDs: ["thread-1"]
-        ),
-        CodexIPCQueuedFollowUpsChange(conversationID: "thread-1", queuedCount: count)
-      )
-      XCTAssertNil(
-        CodexIPCQueuedFollowUpsChange(
-          broadcast: message,
-          subscribedConversationIDs: ["another-thread"]
+        XCTAssertEqual(
+          CodexIPCQueuedFollowUpsChange(
+            broadcast: message,
+            subscribedConversationIDs: ["thread-1"]
+          ),
+          CodexIPCQueuedFollowUpsChange(conversationID: "thread-1", queuedCount: count)
         )
-      )
+        XCTAssertNil(
+          CodexIPCQueuedFollowUpsChange(
+            broadcast: message,
+            subscribedConversationIDs: ["another-thread"]
+          )
+        )
+      }
     }
   }
 
-  func testVersionTwoRejectsRemoteMissingAndMalformedHosts() {
-    for hostID: Any? in ["remote-host", nil, NSNull(), 1] {
-      var params: [String: Any] = [
-        "conversationId": "thread-1",
-        "messages": [["text": "Ignored content"]],
-      ]
-      params["hostId"] = hostID
-      XCTAssertNil(
-        CodexIPCQueuedFollowUpsChange(
-          broadcast: [
-            "method": "thread-queued-followups-changed",
-            "version": 2,
-            "params": params,
-          ],
-          subscribedConversationIDs: ["thread-1"]
+  func testHostScopedVersionsRejectRemoteMissingAndMalformedHosts() {
+    for version in [2, 3] {
+      for hostID: Any? in ["remote-host", nil, NSNull(), 1] {
+        var params: [String: Any] = [
+          "conversationId": "thread-1",
+          "messages": [["text": "Ignored content"]],
+        ]
+        params["hostId"] = hostID
+        XCTAssertNil(
+          CodexIPCQueuedFollowUpsChange(
+            broadcast: [
+              "method": "thread-queued-followups-changed",
+              "version": version,
+              "params": params,
+            ],
+            subscribedConversationIDs: ["thread-1"]
+          )
         )
-      )
+      }
     }
   }
 
   func testQueuedFollowUpsRejectsUnknownVersionsAndMalformedMessages() {
-    for version in [0, 3] {
+    for version in [0, 4] {
       XCTAssertNil(
         CodexIPCQueuedFollowUpsChange(
           broadcast: [
@@ -116,15 +120,41 @@ final class CodexIPCQueuedFollowUpsTests: XCTestCase {
         )
       )
     }
-    XCTAssertNil(
+    for version in [1, 2, 3] {
+      for messages: Any? in [nil, NSNull(), "invalid", ["not": "an array"]] {
+        var params: [String: Any] = ["hostId": "local", "conversationId": "thread-1"]
+        params["messages"] = messages
+        XCTAssertNil(
+          CodexIPCQueuedFollowUpsChange(
+            broadcast: [
+              "method": "thread-queued-followups-changed",
+              "version": version,
+              "params": params,
+            ],
+            subscribedConversationIDs: ["thread-1"]
+          )
+        )
+      }
+    }
+  }
+
+  func testVersionThreeProjectsOnlyCountDespiteAdditionalMetadata() {
+    let message: [String: Any] = [
+      "method": "thread-queued-followups-changed",
+      "version": 3,
+      "sourceClientId": "sender",
+      "params": [
+        "hostId": "local",
+        "conversationId": "thread-1",
+        "messages": [["text": "Ignored content", "id": "message-1"]],
+        "additionalMetadata": "Ignored metadata",
+      ],
+    ]
+    XCTAssertEqual(
       CodexIPCQueuedFollowUpsChange(
-        broadcast: [
-          "method": "thread-queued-followups-changed",
-          "version": 2,
-          "params": ["hostId": "local", "conversationId": "thread-1", "messages": "invalid"],
-        ],
-        subscribedConversationIDs: ["thread-1"]
-      )
+        broadcast: message, subscribedConversationIDs: ["thread-1"]
+      ),
+      CodexIPCQueuedFollowUpsChange(conversationID: "thread-1", queuedCount: 1)
     )
   }
 }
