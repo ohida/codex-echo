@@ -193,11 +193,13 @@ enum SpokenUpdateCopy {
   static func startupStatus(
     observedRunningTaskCount: Int,
     remainingPercent: Int? = nil,
+    ordinaryUsageAllowed: Bool? = nil,
     information: Set<StartupAnnouncementInformation> = [.activeTasks]
   ) -> String {
     let informationText = startupInformationStatus(
       observedRunningTaskCount: observedRunningTaskCount,
       remainingPercent: remainingPercent,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       information: information
     )
     var sentences = [SpokenAnnouncementEvent.startupSummary.announcementText]
@@ -210,13 +212,16 @@ enum SpokenUpdateCopy {
   static func startupInformationStatus(
     observedRunningTaskCount: Int,
     remainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil,
     information: Set<StartupAnnouncementInformation>
   ) -> String {
     StartupAnnouncementInformation.allCases.compactMap { item in
       guard information.contains(item) else { return nil }
       return switch item {
       case .codexCapacity:
-        remainingPercent.map(startupCapacity)
+        remainingPercent.map {
+          startupCapacity(remainingPercent: $0, ordinaryUsageAllowed: ordinaryUsageAllowed)
+        }
       case .activeTasks:
         switch observedRunningTaskCount {
         case 1:
@@ -230,10 +235,15 @@ enum SpokenUpdateCopy {
     }.joined(separator: " ")
   }
 
-  static func startupCapacity(remainingPercent: Int) -> String {
+  static func startupCapacity(
+    remainingPercent: Int,
+    ordinaryUsageAllowed: Bool? = nil
+  ) -> String {
     let remainingPercent = min(max(remainingPercent, 0), 100)
     return remainingPercent == 0
-      ? "Codex capacity depleted."
+      ? (ordinaryUsageAllowed == false
+        ? SpokenAnnouncementEvent.usageDepleted.announcementText
+        : "Codex capacity, less than 1 percent remaining.")
       : "Codex capacity, \(remainingPercent) percent remaining."
   }
 
@@ -270,18 +280,25 @@ enum UsageAnnouncementPolicy {
 
   static func announcement(
     previousRemainingPercent: Int?,
+    previousOrdinaryUsageAllowed: Bool? = nil,
     remainingPercent: Int,
+    ordinaryUsageAllowed: Bool? = nil,
     delivery: SpokenAnnouncementDelivery
   ) -> SpokenUpdateAnnouncement? {
     let remainingPercent = min(max(remainingPercent, 0), 100)
     let clampedPreviousPercent = previousRemainingPercent.map {
       min(max($0, 0), 100)
     }
-    guard clampedPreviousPercent != remainingPercent else { return nil }
+    guard clampedPreviousPercent != remainingPercent
+      || (remainingPercent == 0 && ordinaryUsageAllowed != nil
+        && previousOrdinaryUsageAllowed != ordinaryUsageAllowed)
+    else { return nil }
     guard
       let event = events(
         previousRemainingPercent: clampedPreviousPercent,
-        remainingPercent: remainingPercent
+        previousOrdinaryUsageAllowed: previousOrdinaryUsageAllowed,
+        remainingPercent: remainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed
       ).first(where: { delivery.rule(for: $0).isEnabled })
     else { return nil }
     let rule = delivery.rule(for: event)
@@ -289,22 +306,35 @@ enum UsageAnnouncementPolicy {
       event: event,
       text: event == .usageIncreased
         ? "Codex capacity increased to \(remainingPercent) percent."
-        : SpokenUpdateCopy.startupCapacity(remainingPercent: remainingPercent),
+        : SpokenUpdateCopy.startupCapacity(
+          remainingPercent: remainingPercent,
+          ordinaryUsageAllowed: ordinaryUsageAllowed
+        ),
       cue: rule.alertSound.cue
     )
   }
 
   private static func events(
     previousRemainingPercent: Int?,
-    remainingPercent: Int
+    previousOrdinaryUsageAllowed: Bool?,
+    remainingPercent: Int,
+    ordinaryUsageAllowed: Bool?
   ) -> [SpokenAnnouncementEvent] {
     if let previousRemainingPercent,
       remainingPercent > previousRemainingPercent
     {
       return [.usageIncreased]
     }
+    let depletedEvents: [SpokenAnnouncementEvent] =
+      remainingPercent == 0 && ordinaryUsageAllowed == false
+        && (previousRemainingPercent != 0 || previousOrdinaryUsageAllowed != false)
+      ? [.usageDepleted] : []
+    let regainedSubPercentEvents: [SpokenAnnouncementEvent] =
+      remainingPercent == 0 && previousRemainingPercent == 0
+        && previousOrdinaryUsageAllowed == false && ordinaryUsageAllowed == true
+      ? [.usageOnePercent] : []
     let thresholds: [(Int, SpokenAnnouncementEvent)] = [
-      (0, .usageDepleted), (1, .usageOnePercent), (5, .usageFivePercent),
+      (1, .usageOnePercent), (5, .usageFivePercent),
       (10, .usageTenPercent), (20, .usageTwentyPercent),
     ]
     let crossedEvents = thresholds.compactMap { threshold, event in
@@ -313,7 +343,7 @@ enum UsageAnnouncementPolicy {
       else { return nil as SpokenAnnouncementEvent? }
       return event
     }
-    return crossedEvents + [.usageChanged]
+    return depletedEvents + regainedSubPercentEvents + crossedEvents + [.usageChanged]
   }
 }
 
@@ -549,6 +579,8 @@ final class SpokenUpdateAnnouncer {
   private var previousDesktopAppState: CodexDesktopAppState?
   private var queuedFollowUpCountsByTaskID: [String: Int] = [:]
   private var previousRemainingUsagePercent: Int?
+  private var previousOrdinaryUsageAllowed: Bool?
+  private var currentOrdinaryUsageAllowed: Bool?
   private var currentDelivery: SpokenAnnouncementDelivery?
   private var deliveryChangedSinceLaunch = false
   private var completedInitialHydration = false
@@ -733,11 +765,17 @@ final class SpokenUpdateAnnouncer {
 
   func observeUsage(
     remainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil,
     delivery: SpokenAnnouncementDelivery
   ) {
+    currentOrdinaryUsageAllowed = ordinaryUsageAllowed
     guard let remainingPercent else { return }
     let previousRemainingPercent = previousRemainingUsagePercent
+    let previousAllowed = previousOrdinaryUsageAllowed
     previousRemainingUsagePercent = remainingPercent
+    if let ordinaryUsageAllowed {
+      previousOrdinaryUsageAllowed = ordinaryUsageAllowed
+    }
     guard liveUpdatesAreArmed else { return }
     if previousRemainingPercent == nil {
       announcePendingStartupInformationIfReady(delivery: delivery)
@@ -746,7 +784,9 @@ final class SpokenUpdateAnnouncer {
     guard
       let announcement = UsageAnnouncementPolicy.announcement(
         previousRemainingPercent: previousRemainingPercent,
+        previousOrdinaryUsageAllowed: previousAllowed,
         remainingPercent: remainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed,
         delivery: delivery
       )
     else { return }
@@ -854,6 +894,7 @@ final class SpokenUpdateAnnouncer {
             observedRunningTaskCount:
               startupSnapshot.observedRunningTaskCount,
             remainingPercent: previousRemainingUsagePercent,
+            ordinaryUsageAllowed: currentOrdinaryUsageAllowed,
             information: defersStartupInformation ? [] : startupInformation
           ),
           channel: .startup,
@@ -908,6 +949,7 @@ final class SpokenUpdateAnnouncer {
       observedRunningTaskCount:
         pendingInformation.snapshot.observedRunningTaskCount,
       remainingPercent: remainingPercent,
+      ordinaryUsageAllowed: currentOrdinaryUsageAllowed,
       information: pendingInformation.information
         .intersection(delivery.configuration.startupInformation)
     )
@@ -1101,11 +1143,11 @@ final class SpokenUpdateCoordinator {
       .store(in: &cancellables)
 
     model.$codexUsageSnapshot
-      .map { $0?.remainingPercent }
       .combineLatest(deliveryPublisher)
-      .sink { [weak announcer] remainingPercent, delivery in
+      .sink { [weak announcer] snapshot, delivery in
         announcer?.observeUsage(
-          remainingPercent: remainingPercent,
+          remainingPercent: snapshot?.remainingPercent,
+          ordinaryUsageAllowed: snapshot?.ordinaryUsageAllowed,
           delivery: delivery
         )
       }

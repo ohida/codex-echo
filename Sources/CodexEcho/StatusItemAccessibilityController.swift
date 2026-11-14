@@ -31,6 +31,7 @@ final class StatusItemAccessibilityController {
     let capacityRemainingPercent: Int?
     let showsHealth: Bool
     let statusLabel: String
+    var ordinaryUsageAllowed: Bool? = nil
   }
 
   private var elementsByKey: [String: StatusItemAccessibilityElement] = [:]
@@ -142,14 +143,16 @@ final class StatusItemAccessibilityController {
         key: "overflow",
         width: WorkerCrewLayout.summaryWidth(
           overflowCount: snapshot.overflowCount,
-          capacityRemainingPercent: snapshot.capacityRemainingPercent
+          capacityRemainingPercent: snapshot.capacityRemainingPercent,
+          ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed
         ),
         role: .button,
         label: CrewSummaryAccessibility.label(
           overflowCount: snapshot.overflowCount,
           attentionCount: snapshot.overflowAttentionCount,
           unreadCompletionCount: snapshot.overflowUnreadCompletionCount,
-          capacityRemainingPercent: snapshot.capacityRemainingPercent
+          capacityRemainingPercent: snapshot.capacityRemainingPercent,
+          ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed
         ),
         help: "Shows and manages the remaining tasks",
         onPress: { _ = onAction(.showOverflowMenu) }
@@ -159,11 +162,12 @@ final class StatusItemAccessibilityController {
         key: "codex-capacity",
         width: WorkerCrewLayout.summaryWidth(
           overflowCount: 0,
-          capacityRemainingPercent: remainingPercent
+          capacityRemainingPercent: remainingPercent,
+          ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed
         ),
         role: .staticText,
         label: "Codex capacity",
-        value: "\(remainingPercent) percent remaining"
+        value: CapacityRemainingPresentation(remainingPercent, ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed).accessibilityValue
       )
     }
 

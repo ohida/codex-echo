@@ -102,6 +102,7 @@ struct SignalCoreLabel: View {
       settings.showsCapacityInMenuBar
       ? model.codexUsageSnapshot?.remainingPercent
       : nil
+    let ordinaryUsageAllowed = model.codexUsageSnapshot?.ordinaryUsageAllowed
     let healthMode = connectionHealthMode
     let fallbackSymbolName = model.statusPresentation.fallbackSymbolName
     let motionReduced = effectiveReduceMotion
@@ -125,6 +126,7 @@ struct SignalCoreLabel: View {
         overflowUnreadCompletionCount: overflowUnreadCompletionCount,
         overflowAttentionCount: overflowAttentionCount,
         capacityRemainingPercent: capacityRemainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed,
         healthMode: crews.isEmpty ? nil : healthMode,
         ringDrag: interaction.ringDrag,
         fallbackAccessibilityLabel: fallbackAccessibilityLabel,
@@ -149,6 +151,7 @@ struct SignalCoreLabel: View {
         forDisplayedCrewCount: crews.count,
         overflowCount: overflowCount,
         capacityRemainingPercent: capacityRemainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed,
         showsHealthBadge: !crews.isEmpty && healthMode != nil
       ),
       height: 22
@@ -278,12 +281,14 @@ enum WorkerCrewLayout {
     forCrewCount count: Int,
     maximumVisibleCrews: Int = StatusItemTaskPolicy.visibleLimit,
     capacityRemainingPercent: Int? = nil,
+    ordinaryUsageAllowed: Bool? = nil,
     showsHealthBadge: Bool = false
   ) -> CGFloat {
     contentWidth(
       forDisplayedCrewCount: min(count, maximumVisibleCrews),
       overflowCount: max(count - maximumVisibleCrews, 0),
       capacityRemainingPercent: capacityRemainingPercent,
+      ordinaryUsageAllowed: ordinaryUsageAllowed,
       showsHealthBadge: showsHealthBadge
     )
   }
@@ -292,6 +297,7 @@ enum WorkerCrewLayout {
     forDisplayedCrewCount visibleCount: Int,
     overflowCount: Int,
     capacityRemainingPercent: Int? = nil,
+    ordinaryUsageAllowed: Bool? = nil,
     showsHealthBadge: Bool = false
   ) -> CGFloat {
     let renderedTaskOrFallbackCount = max(visibleCount, 1)
@@ -301,14 +307,16 @@ enum WorkerCrewLayout {
       + (hasSummary ? summarySpacing : 0)
       + summaryWidth(
         overflowCount: overflowCount,
-        capacityRemainingPercent: capacityRemainingPercent
+        capacityRemainingPercent: capacityRemainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed
       )
       + (showsHealthBadge ? spacing + healthWidth : 0)
   }
 
   static func summaryWidth(
     overflowCount: Int,
-    capacityRemainingPercent: Int?
+    capacityRemainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> CGFloat {
     let hasOverflow = overflowCount > 0
     guard hasOverflow || capacityRemainingPercent != nil else { return 0 }
@@ -325,7 +333,7 @@ enum WorkerCrewLayout {
         width += summaryContentSpacing * 2 + summaryDividerWidth
       }
       width += summaryTextWidth(
-        "\(min(max(capacityRemainingPercent, 0), 100))%",
+        CapacityRemainingPresentation(capacityRemainingPercent, ordinaryUsageAllowed: ordinaryUsageAllowed).percentText,
         weight: .semibold
       )
     }
@@ -335,14 +343,16 @@ enum WorkerCrewLayout {
   static func summaryRange(
     displayedCrewCount: Int,
     overflowCount: Int,
-    capacityRemainingPercent: Int?
+    capacityRemainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> ClosedRange<CGFloat>? {
     guard overflowCount > 0 || capacityRemainingPercent != nil else { return nil }
     let renderedTaskOrFallbackCount = max(displayedCrewCount, 1)
     let start = taskGroupWidth(for: renderedTaskOrFallbackCount) + summarySpacing
     let width = summaryWidth(
       overflowCount: overflowCount,
-      capacityRemainingPercent: capacityRemainingPercent
+      capacityRemainingPercent: capacityRemainingPercent,
+      ordinaryUsageAllowed: ordinaryUsageAllowed
     )
     return start...(start + width)
   }
@@ -351,7 +361,8 @@ enum WorkerCrewLayout {
     at x: CGFloat,
     displayedCrewCount: Int,
     overflowCount: Int,
-    capacityRemainingPercent: Int? = nil
+    capacityRemainingPercent: Int? = nil,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> WorkerCrewHitTarget? {
     guard x >= 0 else { return nil }
     let stride = taskStride
@@ -370,7 +381,8 @@ enum WorkerCrewLayout {
       let summaryRange = summaryRange(
         displayedCrewCount: displayedCrewCount,
         overflowCount: overflowCount,
-        capacityRemainingPercent: capacityRemainingPercent
+        capacityRemainingPercent: capacityRemainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed
       )
     else { return nil }
     if summaryRange.contains(x) {
@@ -409,13 +421,15 @@ enum StatusItemHoverPolicy {
     at x: CGFloat,
     displayedCrewCount: Int,
     overflowCount: Int,
-    capacityRemainingPercent: Int?
+    capacityRemainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> StatusItemHoverTarget? {
     switch WorkerCrewLayout.hitTarget(
       at: x,
       displayedCrewCount: displayedCrewCount,
       overflowCount: overflowCount,
-      capacityRemainingPercent: capacityRemainingPercent
+      capacityRemainingPercent: capacityRemainingPercent,
+      ordinaryUsageAllowed: ordinaryUsageAllowed
     ) {
     case .crew(let index):
       return .task(index)
@@ -426,7 +440,8 @@ enum StatusItemHoverPolicy {
         let summaryRange = WorkerCrewLayout.summaryRange(
           displayedCrewCount: displayedCrewCount,
           overflowCount: overflowCount,
-          capacityRemainingPercent: capacityRemainingPercent
+          capacityRemainingPercent: capacityRemainingPercent,
+          ordinaryUsageAllowed: ordinaryUsageAllowed
         ),
         summaryRange.contains(x)
       else { return nil }
@@ -734,7 +749,8 @@ enum CrewSummaryAccessibility {
     overflowCount: Int,
     attentionCount: Int,
     unreadCompletionCount: Int,
-    capacityRemainingPercent: Int?
+    capacityRemainingPercent: Int?,
+    ordinaryUsageAllowed: Bool? = nil
   ) -> String {
     var parts: [String] = []
     if overflowCount > 0 {
@@ -747,7 +763,9 @@ enum CrewSummaryAccessibility {
       )
     }
     if let capacityRemainingPercent {
-      parts.append("Codex capacity \(capacityRemainingPercent) percent remaining")
+      parts.append(
+        "Codex capacity \(CapacityRemainingPresentation(capacityRemainingPercent, ordinaryUsageAllowed: ordinaryUsageAllowed).accessibilityValue)"
+      )
     }
     return parts.joined(separator: ", ")
   }
@@ -762,6 +780,7 @@ private struct WorkerCrewRow: View {
   let overflowUnreadCompletionCount: Int
   let overflowAttentionCount: Int
   let capacityRemainingPercent: Int?
+  let ordinaryUsageAllowed: Bool?
   let healthMode: WorkerCoreMode?
   let ringDrag: CrewRingDragPresentation?
   let fallbackAccessibilityLabel: String
@@ -829,6 +848,7 @@ private struct WorkerCrewRow: View {
             unreadCompletionCount: overflowUnreadCompletionCount,
             attentionCount: overflowAttentionCount,
             capacityRemainingPercent: capacityRemainingPercent,
+            ordinaryUsageAllowed: ordinaryUsageAllowed,
             phase: phase,
             reduceMotion: reduceMotion
           )
@@ -839,7 +859,8 @@ private struct WorkerCrewRow: View {
               overflowCount: overflowCount,
               attentionCount: overflowAttentionCount,
               unreadCompletionCount: overflowUnreadCompletionCount,
-              capacityRemainingPercent: capacityRemainingPercent
+              capacityRemainingPercent: capacityRemainingPercent,
+              ordinaryUsageAllowed: ordinaryUsageAllowed
             )
           )
           .accessibilityHint("Shows the remaining tasks")
@@ -851,13 +872,16 @@ private struct WorkerCrewRow: View {
             unreadCompletionCount: 0,
             attentionCount: 0,
             capacityRemainingPercent: capacityRemainingPercent,
+            ordinaryUsageAllowed: ordinaryUsageAllowed,
             phase: phase,
             reduceMotion: reduceMotion
           )
           .padding(.leading, WorkerCrewLayout.summarySpacing)
           .accessibilityElement(children: .ignore)
           .accessibilityLabel("Codex capacity")
-          .accessibilityValue("\(capacityRemainingPercent) percent remaining")
+          .accessibilityValue(
+            CapacityRemainingPresentation(capacityRemainingPercent, ordinaryUsageAllowed: ordinaryUsageAllowed).accessibilityValue
+          )
         }
       }
 
@@ -873,6 +897,7 @@ private struct WorkerCrewRow: View {
         forDisplayedCrewCount: crews.count,
         overflowCount: overflowCount,
         capacityRemainingPercent: capacityRemainingPercent,
+        ordinaryUsageAllowed: ordinaryUsageAllowed,
         showsHealthBadge: healthMode != nil
       ),
       height: 22
@@ -900,6 +925,7 @@ struct CrewSummaryBadge: View {
   let unreadCompletionCount: Int
   let attentionCount: Int
   let capacityRemainingPercent: Int?
+  var ordinaryUsageAllowed: Bool? = nil
   let phase: TimeInterval
   let reduceMotion: Bool
 
@@ -917,7 +943,7 @@ struct CrewSummaryBadge: View {
           .frame(width: 1, height: 8)
       }
       if let capacityRemainingPercent {
-        Text("\(capacityRemainingPercent)%")
+        Text(CapacityRemainingPresentation(capacityRemainingPercent, ordinaryUsageAllowed: ordinaryUsageAllowed).percentText)
           .font(.system(size: 9, weight: .semibold, design: .rounded))
           .monospacedDigit()
           .foregroundStyle(.primary)

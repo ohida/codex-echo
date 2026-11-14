@@ -240,7 +240,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         taskIDs: model.statusBarTasks.map(\.id),
         overflowCount: model.overflowCrewTasks.count,
         capacityRemainingPercent: displayedCapacityRemainingPercent,
-        taskOpenMouseButton: model.settings.taskOpenMouseButton
+        taskOpenMouseButton: model.settings.taskOpenMouseButton,
+        ordinaryUsageAllowed: displayedOrdinaryUsageAllowed
       )
     },
     onAction: { [weak self] action in
@@ -275,6 +276,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         model.settings.showsCapacityInMenuBar
         ? model.codexUsageSnapshot?.remainingPercent
         : nil,
+      ordinaryUsageAllowed: model.codexUsageSnapshot?.ordinaryUsageAllowed,
       showsHealthBadge: !model.statusBarTasks.isEmpty
         && model.statusPresentation.requiresStatusBadge
     )
@@ -418,7 +420,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       at: point.x,
       displayedCrewCount: tasks.count,
       overflowCount: model.overflowCrewTasks.count,
-      capacityRemainingPercent: displayedCapacityRemainingPercent
+      capacityRemainingPercent: displayedCapacityRemainingPercent,
+      ordinaryUsageAllowed: displayedOrdinaryUsageAllowed
     ) {
     case .task(let index) where tasks.indices.contains(index):
       return .task(tasks[index].id)
@@ -470,7 +473,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       let summaryRange = WorkerCrewLayout.summaryRange(
         displayedCrewCount: model.statusBarTasks.count,
         overflowCount: model.overflowCrewTasks.count,
-        capacityRemainingPercent: displayedCapacityRemainingPercent
+        capacityRemainingPercent: displayedCapacityRemainingPercent,
+        ordinaryUsageAllowed: displayedOrdinaryUsageAllowed
       )
     else { return nil }
     let summaryRect = NSRect(
@@ -855,7 +859,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   private func addCodexCapacityItem(to menu: NSMenu) {
     let usage = model.codexUsageSnapshot
     let presentation = CapacityMenuItemPresentation.make(
-      remainingPercent: usage?.remainingPercent
+      remainingPercent: usage?.remainingPercent,
+      ordinaryUsageAllowed: usage?.ordinaryUsageAllowed
     )
     let item = NSMenuItem(
       title: presentation.title,
@@ -868,7 +873,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       description: presentation.title
     )
     if let remainingPercent = usage?.remainingPercent {
-      item.setAccessibilityValue("\(remainingPercent) percent remaining")
+      item.setAccessibilityValue(
+        CapacityRemainingPresentation(remainingPercent, ordinaryUsageAllowed: usage?.ordinaryUsageAllowed).accessibilityValue
+      )
     }
     menu.addItem(item)
   }
@@ -1400,6 +1407,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       forDisplayedCrewCount: displayedTasks.count,
       overflowCount: overflowTasks.count,
       capacityRemainingPercent: displayedCapacityRemainingPercent,
+      ordinaryUsageAllowed: displayedOrdinaryUsageAllowed,
       showsHealthBadge: showsHealthBadge
     )
     if let button = statusItem.button {
@@ -1454,7 +1462,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       overflowUnreadCompletionCount: overflowTasks.filter(\.showsUnreadCompletionSignal).count,
       capacityRemainingPercent: displayedCapacityRemainingPercent,
       showsHealth: !tasks.isEmpty && model.statusPresentation.requiresStatusBadge,
-      statusLabel: model.statusPresentation.accessibilityLabel
+      statusLabel: model.statusPresentation.accessibilityLabel,
+      ordinaryUsageAllowed: displayedOrdinaryUsageAllowed
     )
     accessibilityController.update(
       parent: button,
@@ -1505,6 +1514,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     return model.codexUsageSnapshot?.remainingPercent
   }
 
+  private var displayedOrdinaryUsageAllowed: Bool? {
+    guard model.settings.showsCapacityInMenuBar else { return nil }
+    return model.codexUsageSnapshot?.ordinaryUsageAllowed
+  }
+
   private var capacityResetDescription: String? {
     model.codexUsageSnapshot?.resetsAt.map {
       "Resets \($0.formatted(date: .abbreviated, time: .shortened))"
@@ -1519,7 +1533,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       unreadCompletionCount: overflowTasks.filter(\.showsUnreadCompletionSignal).count,
       capacityRemainingPercent: displayedCapacityRemainingPercent,
       resetDescription:
-        displayedCapacityRemainingPercent == nil ? nil : capacityResetDescription
+        displayedCapacityRemainingPercent == nil ? nil : capacityResetDescription,
+      ordinaryUsageAllowed: displayedOrdinaryUsageAllowed
     )
   }
 

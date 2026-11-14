@@ -1697,7 +1697,12 @@ struct CapacityHistoryView: View {
   ) -> some View {
     if let remainingPercent = presentation.remainingPercent {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
-        Text("\(remainingPercent)%")
+        Text(
+          CapacityRemainingPresentation(
+            remainingPercent,
+            ordinaryUsageAllowed: model.codexUsageSnapshot?.ordinaryUsageAllowed
+          ).percentText
+        )
           .font(.system(size: 34, weight: .semibold, design: .rounded))
           .contentTransition(.numericText())
         Text("remaining")
@@ -1705,27 +1710,39 @@ struct CapacityHistoryView: View {
           .foregroundStyle(.secondary)
       }
       .accessibilityElement(children: .combine)
+      .accessibilityLabel(
+        CapacityRemainingPresentation(
+          remainingPercent,
+          ordinaryUsageAllowed: model.codexUsageSnapshot?.ordinaryUsageAllowed
+        ).accessibilityValue
+      )
     } else if let lastReceivedEndpoint {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
-        Text("\(lastReceivedEndpoint.remainingPercent)%")
+        Text(CapacityRemainingPresentation(lastReceivedEndpoint.remainingPercent).percentText)
           .font(.system(size: 30, weight: .semibold, design: .rounded))
         Text("last received")
           .font(.headline)
           .foregroundStyle(.secondary)
       }
       .accessibilityElement(children: .combine)
+      .accessibilityLabel(
+        "\(CapacityRemainingPresentation(lastReceivedEndpoint.remainingPercent).accessibilityValue), last received"
+      )
     } else if let lastObservedPercent = lastObservedPercent(
       selectedObservations: selectedObservations,
       liveValue: liveValue
     ) {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
-        Text("\(lastObservedPercent)%")
+        Text(CapacityRemainingPresentation(lastObservedPercent).percentText)
           .font(.system(size: 30, weight: .semibold, design: .rounded))
         Text("last observed")
           .font(.headline)
           .foregroundStyle(.secondary)
       }
       .accessibilityElement(children: .combine)
+      .accessibilityLabel(
+        "\(CapacityRemainingPresentation(lastObservedPercent).accessibilityValue), last observed"
+      )
     } else if !recorder.isRecordingEnabled {
       Text("No recorded history")
         .font(.headline)
