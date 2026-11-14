@@ -75,8 +75,9 @@ Run the development build directly without registering MCP:
 This command prints one JSON object and exits. It reuses the MCP snapshot reader,
 without opening the UI, reading history, refreshing the account, or writing files.
 It does not register MCP or require new credentials. `retrieved_at` is the read
-request time; `source.current_observed_at` and `credits.observed_at` are the actual
-observations. `source.kind` identifies the local Echo cache, and
+request time; `source.current_observed_at`, `credits.observed_at`, and
+`reset_credits.observed_at` identify each value's independent observation.
+`source.kind` identifies the local Echo cache, and
 `source.refreshed_upstream` is false for cache-only reads. Freshness uses the same six-minute
 threshold and availability checks as MCP; it is not proof of a live server read.
 
@@ -86,10 +87,14 @@ threshold and availability checks as MCP; it is not proof of a live server read.
   Unknown balance is null with `balance_status: "unknown"`. Purchased-credit expiry
   is explicitly `not_provided_by_source`; it is never inferred from reset credits.
 - `reset_credits` preserves the observed count and known expiry dates, if present.
-  These dates may be incomplete. Cache-only reads report freshness as `unknown`
-  because existing snapshots do not record an independent reset-credit observation
-  time. A missing count is null, not zero. Do not recommend spending a reset from
-  this cache alone.
+  These dates may be incomplete. MCP and JSON reads return `observed_at` (the local
+  receipt time of the response that supplied the reset summary), `age_seconds`,
+  and independent `freshness` using the same six-minute and availability checks.
+  Window-only updates and responses with a missing or null reset summary preserve
+  the previous reset count, expiry dates, and receipt time. Older snapshots without
+  that time retain their count and dates but return null time and age with `unknown`
+  freshness. A missing count is null in JSON (the object is absent in MCP), not zero.
+  Do not recommend spending a reset from this cache alone.
 - Missing or stale observations still produce JSON with exit code 0. Unreadable,
   malformed, or unsupported snapshots produce a static `snapshot_unreadable` error
   and exit code 1. Unknown or extra arguments produce `invalid_arguments` and exit code 64.

@@ -130,10 +130,18 @@ struct CodexCapacityMCPFileDataProvider: CodexCapacityMCPDataProviding {
       root["history"] = historyEnvelope(context: context, now: now)
     }
     if let resetCredits = lastSuccess?.resetCredits {
+      let resetAge = resetCredits.observedAt.map { now.timeIntervalSince($0) }
+      let resetsAreFresh = snapshot.availability.state == .available
+        && resetAge.map { $0 >= 0 && $0 <= 6 * 60 } == true
       root["reset_credits"] = .object([
         "available_count": .int(resetCredits.availableCount),
         "expiration_dates": .array(
           resetCredits.expirationDates.map(dateValue)
+        ),
+        "observed_at": resetCredits.observedAt.map(dateValue) ?? .null,
+        "age_seconds": resetAge.map { .double(max($0, 0)) } ?? .null,
+        "freshness": .string(
+          resetAge == nil ? "unknown" : (resetsAreFresh ? "fresh" : "stale")
         ),
       ])
     }

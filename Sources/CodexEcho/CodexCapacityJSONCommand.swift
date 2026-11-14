@@ -21,15 +21,11 @@ enum CodexCapacityJSONCommand {
     )
     let response = try await CodexCapacityMCPFileDataProvider(now: { now })
       .getCodexCapacity(snapshot: snapshot, includeHistory: false)
-    return try output(
-      response: response, now: now, live: true,
-      resetObservedAt: usage.rateLimitResetCredits?.observedAt
-    )
+    return try output(response: response, now: now, live: true)
   }
 
   private static func output(
-    response: CodexCapacityMCPToolResponse, now: Date, live: Bool,
-    resetObservedAt: Date? = nil
+    response: CodexCapacityMCPToolResponse, now: Date, live: Bool
   ) throws -> Data {
     var root = response.structuredContent.objectValue ?? [:]
     var source = root["source"]?.objectValue ?? [:]
@@ -66,20 +62,18 @@ enum CodexCapacityJSONCommand {
     resets["status"] = .string(
       resets["available_count"]?.intValue == nil ? "unknown" : "observed"
     )
-    // Only the parser's receipt time for this reset summary qualifies it as observed.
-    // A new CLI invocation, a window update, or a manually constructed value does not.
-    if let resetObservedAt, resets["available_count"]?.intValue != nil {
-      let age = now.timeIntervalSince(resetObservedAt)
-      let fresh = age >= 0 && age <= 360
-      resets["freshness"] = .string(fresh ? "fresh" : "stale")
-      resets["observed_at"] = .string(ISO8601DateFormatter().string(from: resetObservedAt))
-      resets["age_seconds"] = .double(max(age, 0))
+    // Use the provider's independent receipt evidence for both live and cached reads.
+    resets["freshness"] = resets["freshness"] ?? .string("unknown")
+    resets["observed_at"] = resets["observed_at"] ?? .null
+    resets["age_seconds"] = resets["age_seconds"] ?? .null
+    if resets["observed_at"]?.stringValue != nil {
       resets["observation_source"] = .string("app_server_response_received")
-      resets["freshness_reason"] = .string(fresh ? "recent_response" : "response_time_outside_freshness_window")
+      resets["freshness_reason"] = .string(
+        resets["freshness"] == .string("fresh") ? "recent_response"
+          : (source["availability"] == .string("unavailable") ? "source_unavailable"
+            : "response_time_outside_freshness_window")
+      )
     } else {
-      resets["freshness"] = .string("unknown")
-      resets["observed_at"] = .null
-      resets["age_seconds"] = .null
       resets["observation_source"] = .string("unknown")
       resets["freshness_reason"] = .string("independent_observation_time_not_recorded")
     }

@@ -55,17 +55,22 @@ struct CapacityCurrentResetCredits: Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case availableCount = "available_count"
     case expirationDates = "expiration_dates"
+    case observedAt = "observed_at"
   }
 
   let availableCount: Int
   let expirationDates: [Date]
+  // Optional for older snapshots and summaries without receipt evidence.
+  let observedAt: Date?
 
   init(resetCredits: CodexRateLimitResetCredits) {
     availableCount = resetCredits.availableCount
     expirationDates = resetCredits.expirationDates
+    observedAt = resetCredits.observedAt
   }
 
-  init(availableCount: Int, expirationDates: [Date]) {
+  init(availableCount: Int, expirationDates: [Date], observedAt: Date? = nil) {
+    self.observedAt = observedAt
     self.availableCount = max(availableCount, 0)
     self.expirationDates = Array(
       expirationDates.prefix(self.availableCount)
