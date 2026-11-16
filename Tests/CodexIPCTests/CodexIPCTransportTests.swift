@@ -6,6 +6,162 @@ import XCTest
 
 final class CodexIPCTransportTests: XCTestCase {
   @MainActor
+  func testSupportedStreamVersionsDeliverSnapshotsAndPatches() async throws {
+    for version in [11, 13] {
+      let server = try IPCUnixSocketTestServer()
+      defer { server.stop() }
+      let snapshotReceived = expectation(description: "Version \(version) snapshot received")
+      let patchesReceived = expectation(description: "Version \(version) patches received")
+      let keepConnectionOpen = DispatchSemaphore(value: 0)
+      let serverFailure = LockedValue<String?>(nil)
+      server.accept { descriptor in
+        do {
+          try server.completeInitializeHandshake(on: descriptor)
+          _ = try server.readFrame(on: descriptor)
+          try server.writeFrame(
+            [
+              "type": "broadcast",
+              "method": "thread-stream-state-changed",
+              "version": version,
+              "params": [
+                "hostId": "local",
+                "conversationId": "thread-1",
+                "change": [
+                  "type": "snapshot",
+                  "revision": 1,
+                  "conversationState": [
+                    "id": "thread-1",
+                    "threadRuntimeStatus": ["type": "active"],
+                    "hasUnreadTurn": false,
+                  ],
+                ],
+              ],
+            ],
+            on: descriptor
+          )
+          try server.writeFrame(
+            [
+              "type": "broadcast",
+              "method": "thread-stream-state-changed",
+              "version": version,
+              "params": [
+                "hostId": "local",
+                "conversationId": "thread-1",
+                "change": [
+                  "type": "patches",
+                  "baseRevision": 1,
+                  "revision": 2,
+                  "patches": [
+                    ["op": "replace", "path": ["threadRuntimeStatus", "type"], "value": "idle"],
+                    ["op": "replace", "path": ["hasUnreadTurn"], "value": true],
+                  ],
+                  "acceptedTextChanges": [],
+                ],
+              ],
+            ],
+            on: descriptor
+          )
+          _ = keepConnectionOpen.wait(timeout: .now() + 3)
+        } catch {
+          serverFailure.set(String(describing: error))
+        }
+      }
+
+      let client = CodexIPCClient(socketURL: server.socketURL)
+      defer {
+        client.stop()
+        keepConnectionOpen.signal()
+      }
+      var state: JSONValue?
+      client.eventHandler = { event in
+        switch event {
+        case .snapshot(let conversationID, let revision, let snapshot):
+          XCTAssertEqual(conversationID, "thread-1")
+          XCTAssertEqual(revision, 1)
+          XCTAssertEqual(ConversationActivity(conversationState: snapshot)?.state, .working)
+          state = snapshot
+          snapshotReceived.fulfill()
+        case .patches(let conversationID, let baseRevision, let revision, let patches):
+          XCTAssertEqual(conversationID, "thread-1")
+          XCTAssertEqual(baseRevision, 1)
+          XCTAssertEqual(revision, 2)
+          do {
+            var updated = try XCTUnwrap(state)
+            try updated.apply(patches)
+            XCTAssertEqual(ConversationActivity(conversationState: updated)?.state, .ready)
+          } catch {
+            XCTFail("Could not apply version \(version) patches: \(error)")
+          }
+          patchesReceived.fulfill()
+        case .connectionStateChanged(.incompatible(let reason)):
+          XCTFail(reason)
+        default:
+          break
+        }
+      }
+      client.setSubscriptions(["thread-1"])
+      client.start()
+
+      await fulfillment(of: [snapshotReceived, patchesReceived], timeout: 2)
+      XCTAssertNil(serverFailure.value)
+      XCTAssertEqual(client.diagnosticsSnapshot().state, .connected)
+      XCTAssertNil(client.diagnosticsSnapshot().lastFailure)
+    }
+  }
+
+  @MainActor
+  func testUnverifiedStreamVersionsRemainIncompatible() async throws {
+    for version in [0, 10, 12, 14] {
+      let server = try IPCUnixSocketTestServer()
+      defer { server.stop() }
+      let incompatible = expectation(description: "Version \(version) rejected")
+      let keepConnectionOpen = DispatchSemaphore(value: 0)
+      let serverFailure = LockedValue<String?>(nil)
+      server.accept { descriptor in
+        do {
+          try server.completeInitializeHandshake(on: descriptor)
+          _ = try server.readFrame(on: descriptor)
+          try server.writeFrame(
+            [
+              "type": "broadcast",
+              "method": "thread-stream-state-changed",
+              "version": version,
+            ],
+            on: descriptor
+          )
+          _ = keepConnectionOpen.wait(timeout: .now() + 3)
+        } catch {
+          serverFailure.set(String(describing: error))
+        }
+      }
+
+      let client = CodexIPCClient(socketURL: server.socketURL)
+      defer {
+        client.stop()
+        keepConnectionOpen.signal()
+      }
+      client.eventHandler = { event in
+        if case .connectionStateChanged(.incompatible) = event {
+          incompatible.fulfill()
+        }
+      }
+      client.setSubscriptions(["thread-1"])
+      client.start()
+
+      await fulfillment(of: [incompatible], timeout: 2)
+      XCTAssertNil(serverFailure.value)
+      XCTAssertEqual(client.diagnosticsSnapshot().state, .incompatible)
+      XCTAssertEqual(
+        client.diagnosticsSnapshot().lastFailure,
+        CodexIPCDiagnosticsFailure(
+          phase: .streamVersion,
+          kind: .unsupportedVersion(actual: version, expected: 13)
+        )
+      )
+    }
+  }
+
+  @MainActor
   func testWrongInitializeResponseIDTimesOutThenReconnects() async throws {
     let server = try IPCUnixSocketTestServer()
     defer { server.stop() }
